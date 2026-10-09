@@ -14,7 +14,7 @@ function verifySignature(rawBody, signature, appSecret) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function sendWhatsAppText(to, text) {
+async function sendWhatsAppPayload(payload) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const version = process.env.META_GRAPH_VERSION || "v23.0";
@@ -23,17 +23,62 @@ async function sendWhatsAppText(to, text) {
   const response = await fetch(`https://graph.facebook.com/${version}/${encodeURIComponent(phoneNumberId)}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to,
-      type: "text",
-      text: { preview_url: false, body: String(text).slice(0, 4000) }
-    })
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", ...payload })
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`WhatsApp send failed (${response.status}): ${JSON.stringify(result).slice(0, 500)}`);
   return result;
+}
+
+async function sendWhatsAppText(to, text) {
+  return sendWhatsAppPayload({
+    to, type: "text",
+    text: { preview_url: false, body: String(text).slice(0, 4000) }
+  });
+}
+
+async function handleOutbound(event) {
+  const configuredKey = process.env.WA_OUTBOUND_API_KEY;
+  const headers = event.headers || {};
+  const suppliedKey = headers["x-jbsn-outbound-key"] || headers["X-JBSN-OUTBOUND-KEY"];
+  if (!configuredKey || !suppliedKey || suppliedKey.length !== configuredKey.length ||
+      !crypto.timingSafeEqual(Buffer.from(suppliedKey), Buffer.from(configuredKey))) {
+    return json(401, { ok: false, error: "Unauthorized" });
+  }
+  let data;
+  try { data = JSON.parse(event.body || "{}"); }
+  catch (_) { return json(400, { ok: false, error: "Invalid JSON" }); }
+  const to = String(data.to || "").replace(/[^0-9]/g, "");
+  if (!/^\d{8,15}$/.test(to)) return json(400, { ok: false, error: "to must be a WhatsApp number in international digits-only format" });
+
+  try {
+    let result;
+    if (data.type === "template") {
+      if (!data.templateName || !data.language) {
+        return json(400, { ok: false, error: "templateName and language are required for template messages" });
+      }
+      result = await sendWhatsAppPayload({
+        to, type: "template",
+        template: {
+          name: String(data.templateName).slice(0, 200),
+          language: { code: String(data.language).slice(0, 20) },
+          ...(Array.isArray(data.components) ? { components: data.components } : {})
+        }
+      });
+    } else if (data.type === "text") {
+      if (data.customerInitiatedWithin24Hours !== true) {
+        return json(400, { ok: false, error: "Free-form text requires confirmation that the customer initiated contact within the last 24 hours. Otherwise use an approved template." });
+      }
+      if (!data.text || !String(data.text).trim()) return json(400, { ok: false, error: "text is required" });
+      result = await sendWhatsAppText(to, String(data.text).trim());
+    } else {
+      return json(400, { ok: false, error: "type must be text or template" });
+    }
+    return json(200, { ok: true, messages: result.messages || [], result });
+  } catch (error) {
+    console.error("Outbound WhatsApp send failed:", error.message);
+    return json(502, { ok: false, error: error.message });
+  }
 }
 
 async function handleMessage(message, contact) {
@@ -69,7 +114,6 @@ exports.handler = async (event) => {
   const verifyToken = (process.env.META_WEBHOOK_VERIFY_TOKEN || "").trim();
 
   if (event.httpMethod === "GET") {
-    // Parse rawUrl as well as Netlify's parsed params so dotted Meta query keys work consistently.
     let p = event.queryStringParameters || {};
     try {
       if (event.rawUrl) {
@@ -87,22 +131,25 @@ exports.handler = async (event) => {
       console.error("META_WEBHOOK_VERIFY_TOKEN is missing in the active deployment context.");
       return { statusCode: 500, body: "Webhook verify token is not configured in this deployment" };
     }
-
     const suppliedToken = typeof p["hub.verify_token"] === "string" ? p["hub.verify_token"].trim() : "";
     if (p["hub.mode"] === "subscribe" && suppliedToken === verifyToken && p["hub.challenge"]) {
       return { statusCode: 200, headers: { "content-type": "text/plain; charset=utf-8" }, body: p["hub.challenge"] };
     }
-    console.warn("Webhook verification rejected: query parameters missing or token mismatch.");
     return { statusCode: 403, body: "Webhook verification failed" };
   }
 
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
+  // Authenticated outbound API requests are separate from Meta's signed webhook requests.
+  const requestHeaders = event.headers || {};
+  if (requestHeaders["x-jbsn-outbound-key"] || requestHeaders["X-JBSN-OUTBOUND-KEY"]) {
+    return handleOutbound(event);
+  }
+
   const rawBody = event.isBase64Encoded
     ? Buffer.from(event.body || "", "base64")
     : Buffer.from(event.body || "", "utf8");
-  const headers = event.headers || {};
-  const signature = headers["x-hub-signature-256"] || headers["X-Hub-Signature-256"];
+  const signature = requestHeaders["x-hub-signature-256"] || requestHeaders["X-Hub-Signature-256"];
   if (!verifySignature(rawBody, signature, process.env.META_APP_SECRET)) {
     console.warn("Rejected webhook: missing/invalid signature or META_APP_SECRET.");
     return { statusCode: 401, body: "Invalid signature" };
@@ -111,7 +158,6 @@ exports.handler = async (event) => {
   let payload;
   try { payload = JSON.parse(rawBody.toString("utf8")); }
   catch (_) { return json(400, { ok: false, error: "Invalid JSON" }); }
-
   if (payload.object !== "whatsapp_business_account") return json(404, { ok: false, ignored: true });
 
   try {
