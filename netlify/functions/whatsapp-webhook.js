@@ -22,10 +22,7 @@ async function sendWhatsAppText(to, text) {
 
   const response = await fetch(`https://graph.facebook.com/${version}/${encodeURIComponent(phoneNumberId)}/messages`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -39,24 +36,21 @@ async function sendWhatsAppText(to, text) {
   return result;
 }
 
-async function handleMessage(message, contact, metadata) {
+async function handleMessage(message, contact) {
   if (!message || message.type !== "text" || !message.from || !message.text || !message.text.body) return;
-  // Only process customer-originated text messages. Ignore echoes/statuses and non-text content.
   const gasUrl = process.env.JBSN_APPS_SCRIPT_URL;
   if (!gasUrl) throw new Error("JBSN_APPS_SCRIPT_URL is not configured.");
 
   const customerName = (contact && contact.profile && contact.profile.name) || "";
   const phone = String(message.from);
-  const body = String(message.text.body).slice(0, 6000);
-
   const gasResponse = await fetch(gasUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({
       sessionId: "WA-" + phone,
-      message: body,
+      message: String(message.text.body).slice(0, 6000),
       name: customerName,
-      phone: phone,
+      phone,
       channel: "WHATSAPP"
     }),
     redirect: "follow"
@@ -72,14 +66,33 @@ async function handleMessage(message, contact, metadata) {
 }
 
 exports.handler = async (event) => {
-  const verifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
-  const appSecret = process.env.META_APP_SECRET;
+  const verifyToken = (process.env.META_WEBHOOK_VERIFY_TOKEN || "").trim();
 
   if (event.httpMethod === "GET") {
-    const p = event.queryStringParameters || {};
-    if (p["hub.mode"] === "subscribe" && verifyToken && p["hub.verify_token"] === verifyToken && p["hub.challenge"]) {
+    // Parse rawUrl as well as Netlify's parsed params so dotted Meta query keys work consistently.
+    let p = event.queryStringParameters || {};
+    try {
+      if (event.rawUrl) {
+        const urlParams = new URL(event.rawUrl).searchParams;
+        p = {
+          ...p,
+          "hub.mode": urlParams.get("hub.mode") ?? p["hub.mode"],
+          "hub.verify_token": urlParams.get("hub.verify_token") ?? p["hub.verify_token"],
+          "hub.challenge": urlParams.get("hub.challenge") ?? p["hub.challenge"]
+        };
+      }
+    } catch (_) {}
+
+    if (!verifyToken) {
+      console.error("META_WEBHOOK_VERIFY_TOKEN is missing in the active deployment context.");
+      return { statusCode: 500, body: "Webhook verify token is not configured in this deployment" };
+    }
+
+    const suppliedToken = typeof p["hub.verify_token"] === "string" ? p["hub.verify_token"].trim() : "";
+    if (p["hub.mode"] === "subscribe" && suppliedToken === verifyToken && p["hub.challenge"]) {
       return { statusCode: 200, headers: { "content-type": "text/plain; charset=utf-8" }, body: p["hub.challenge"] };
     }
+    console.warn("Webhook verification rejected: query parameters missing or token mismatch.");
     return { statusCode: 403, body: "Webhook verification failed" };
   }
 
@@ -90,8 +103,7 @@ exports.handler = async (event) => {
     : Buffer.from(event.body || "", "utf8");
   const headers = event.headers || {};
   const signature = headers["x-hub-signature-256"] || headers["X-Hub-Signature-256"];
-
-  if (!verifySignature(rawBody, signature, appSecret)) {
+  if (!verifySignature(rawBody, signature, process.env.META_APP_SECRET)) {
     console.warn("Rejected webhook: missing/invalid signature or META_APP_SECRET.");
     return { statusCode: 401, body: "Invalid signature" };
   }
@@ -102,24 +114,20 @@ exports.handler = async (event) => {
 
   if (payload.object !== "whatsapp_business_account") return json(404, { ok: false, ignored: true });
 
-  // Respond only to actual inbound text messages. Status notifications are safely ignored.
   try {
     for (const entry of payload.entry || []) {
       for (const change of entry.changes || []) {
         if (!change.value || change.field !== "messages") continue;
         const contacts = change.value.contacts || [];
-        const messages = change.value.messages || [];
-        for (const message of messages) {
+        for (const message of change.value.messages || []) {
           const contact = contacts.find(c => c.wa_id === message.from) || null;
-          await handleMessage(message, contact, change.value.metadata || {});
+          await handleMessage(message, contact);
         }
       }
     }
     return json(200, { ok: true });
   } catch (error) {
     console.error("WhatsApp webhook processing failed:", error.message);
-    // Return a failure so Meta can retry. The customer message may be processed twice on retry;
-    // production hardening should add a message-ID idempotency store before high-volume use.
     return json(500, { ok: false, error: "Webhook processing failed" });
   }
 };
