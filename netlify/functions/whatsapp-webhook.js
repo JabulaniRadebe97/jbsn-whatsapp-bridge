@@ -85,6 +85,7 @@ async function handleMessage(message, contact) {
   if (!message || message.type !== "text" || !message.from || !message.text || !message.text.body) return;
   const gasUrl = process.env.JBSN_APPS_SCRIPT_URL;
   if (!gasUrl) throw new Error("JBSN_APPS_SCRIPT_URL is not configured.");
+  console.info("WA inbound: text accepted; forwarding to Apps Script.");
 
   const customerName = (contact && contact.profile && contact.profile.name) || "";
   const phone = String(message.from);
@@ -102,12 +103,15 @@ async function handleMessage(message, contact) {
   });
 
   const gasText = await gasResponse.text();
+  console.info("WA inbound: Apps Script responded with HTTP", gasResponse.status, "body length", gasText.length);
   let result;
   try { result = JSON.parse(gasText); } catch (_) { throw new Error("Apps Script returned a non-JSON response."); }
   if (!gasResponse.ok || !result || result.ok !== true || !result.reply) {
     throw new Error("Apps Script did not return an AI reply: " + gasText.slice(0, 500));
   }
-  await sendWhatsAppText(phone, result.reply);
+  console.info("WA inbound: Apps Script returned a reply; sending through WhatsApp Cloud API.");
+  const sendResult = await sendWhatsAppText(phone, result.reply);
+  console.info("WA inbound: WhatsApp API accepted reply; message id present:", Boolean(sendResult.messages && sendResult.messages[0] && sendResult.messages[0].id));
 }
 
 exports.handler = async (event) => {
@@ -159,6 +163,7 @@ exports.handler = async (event) => {
   try { payload = JSON.parse(rawBody.toString("utf8")); }
   catch (_) { return json(400, { ok: false, error: "Invalid JSON" }); }
   if (payload.object !== "whatsapp_business_account") return json(404, { ok: false, ignored: true });
+  console.info("WA webhook: signature valid; entries:", (payload.entry || []).length);
 
   try {
     for (const entry of payload.entry || []) {
@@ -173,7 +178,7 @@ exports.handler = async (event) => {
     }
     return json(200, { ok: true });
   } catch (error) {
-    console.error("WhatsApp webhook processing failed:", error.message);
+    console.error("WhatsApp webhook processing failed:", error && error.stack ? error.stack : String(error));
     return json(500, { ok: false, error: "Webhook processing failed" });
   }
 };
