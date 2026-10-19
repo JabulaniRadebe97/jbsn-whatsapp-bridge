@@ -47,6 +47,17 @@ class TaskRecoveryTests(unittest.TestCase):
         )
         self.conn.commit()
 
+    def test_lease_duration_configuration_accepts_bounded_integer(self):
+        self.assertEqual(runtime.configured_lease_seconds("30"), 30)
+        self.assertEqual(runtime.configured_lease_seconds("300"), 300)
+        self.assertEqual(runtime.configured_lease_seconds("86400"), 86400)
+
+    def test_lease_duration_configuration_rejects_invalid_values(self):
+        for value in ("", "abc", "29", "86401", "-1", "30.5"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    runtime.configured_lease_seconds(value)
+
     def test_expired_lease_requeues_and_records_event(self):
         self.add_task("expired", "running", lease=10, token="old")
         recovered = runtime.recover_expired_tasks(self.conn, now=20)
