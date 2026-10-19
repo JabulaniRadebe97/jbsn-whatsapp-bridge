@@ -74,9 +74,9 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
             setup = self.connect_in_schema()
             try:
                 setup.execute(
-                    "INSERT INTO tasks(id,status,attempts,created_at,updated_at) "
-                    "VALUES (%s,'queued',0,1,1)",
-                    ("one-task",),
+                    "INSERT INTO tasks(id,title,task_type,payload,status,risk,attempts,created_at,updated_at) "
+                    "VALUES (%s,%s,%s,%s,'queued',%s,0,1,1)",
+                    ("one-task", "One task", "plan", '{"objective":"test claim"}', "green"),
                 )
                 setup.commit()
             finally:
