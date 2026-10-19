@@ -15,7 +15,20 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL) and os.environ.get("JBSN_DATABASE_BACKEND", "").lower() != "sqlite"
 TOKEN = os.environ.get("JBSN_API_TOKEN", "")
 VERSION = "0.3.0"
-LEASE_SECONDS = 300
+
+def configured_lease_seconds(value=None):
+    """Return a bounded lease duration; reject unsafe deployment configuration."""
+    raw = os.environ.get("JBSN_LEASE_SECONDS", "300") if value is None else value
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("JBSN_LEASE_SECONDS must be an integer between 30 and 86400") from exc
+    if not 30 <= seconds <= 86400:
+        raise ValueError("JBSN_LEASE_SECONDS must be an integer between 30 and 86400")
+    return seconds
+
+
+LEASE_SECONDS = configured_lease_seconds()
 MAX_ATTEMPTS = 3
 
 
