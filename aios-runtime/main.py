@@ -14,7 +14,22 @@ DB_PATH = Path(os.environ.get("JBSN_DB_PATH", str(ROOT / "data" / "jbsn_aios.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL) and os.environ.get("JBSN_DATABASE_BACKEND", "").lower() != "sqlite"
 TOKEN = os.environ.get("JBSN_API_TOKEN", "")
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+
+def configured_lease_seconds(value=None):
+    """Return a bounded lease duration; reject unsafe deployment configuration."""
+    raw = os.environ.get("JBSN_LEASE_SECONDS", "300") if value is None else value
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("JBSN_LEASE_SECONDS must be an integer between 30 and 86400") from exc
+    if not 30 <= seconds <= 86400:
+        raise ValueError("JBSN_LEASE_SECONDS must be an integer between 30 and 86400")
+    return seconds
+
+
+LEASE_SECONDS = configured_lease_seconds()
+MAX_ATTEMPTS = 3
 
 
 class PgCursor:
@@ -109,7 +124,8 @@ def init_db():
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, task_type TEXT NOT NULL,
                 payload TEXT NOT NULL, status TEXT NOT NULL, risk TEXT NOT NULL,
                 result TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0,
-                created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL)""",
+                created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
+                lease_expires_at DOUBLE PRECISION, claim_token TEXT)""",
             "CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at)",
             """CREATE TABLE IF NOT EXISTS events(
                 id BIGSERIAL PRIMARY KEY, task_id TEXT, event_type TEXT NOT NULL,
@@ -122,12 +138,28 @@ def init_db():
         with db() as c:
             for statement in statements:
                 c.execute(statement)
+            c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION")
+            c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claim_token TEXT")
     else:
         with db() as c:
-            c.executescript("""CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,title TEXT NOT NULL,task_type TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+            c.executescript("""CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,title TEXT NOT NULL,task_type TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL,lease_expires_at REAL,claim_token TEXT);
             CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status,created_at);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT,event_type TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,status TEXT NOT NULL,decision_by TEXT,reason TEXT,created_at REAL NOT NULL,decided_at REAL);""")
+            columns = {r["name"] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "lease_expires_at" not in columns:
+                c.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at REAL")
+            if "claim_token" not in columns:
+                c.execute("ALTER TABLE tasks ADD COLUMN claim_token TEXT")
+
+
+def database_epoch(c):
+    """Read epoch time from the database that also stores lease deadlines."""
+    if USE_POSTGRES:
+        row = c.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()
+        return float(row["now"])
+    row = c.execute("SELECT (julianday('now') - 2440587.5) * 86400.0 AS now").fetchone()
+    return float(row["now"])
 
 
 def event(c, task_id, kind, detail):
@@ -162,6 +194,53 @@ def plan(payload):
     }
 
 
+def recover_expired_tasks(c, now=None):
+    """Recover only expired leased tasks. Caller must hold a write transaction."""
+    now = database_epoch(c) if now is None else now
+    if USE_POSTGRES:
+        rows = c.execute(
+            "SELECT id,claim_token,attempts FROM tasks WHERE status='running' "
+            "AND lease_expires_at IS NOT NULL AND lease_expires_at<? "
+            "ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED", (now,)
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT id,claim_token,attempts FROM tasks WHERE status='running' "
+            "AND lease_expires_at IS NOT NULL AND lease_expires_at<? "
+            "ORDER BY lease_expires_at,id", (now,)
+        ).fetchall()
+    recovered = 0
+    for row in rows:
+        new_status = "failed" if row["attempts"] >= MAX_ATTEMPTS else "queued"
+        updated = c.execute(
+            "UPDATE tasks SET status=?,claim_token=NULL,lease_expires_at=NULL,updated_at=? "
+            "WHERE id=? AND status='running' AND claim_token=? AND lease_expires_at<?",
+            (new_status, now, row["id"], row["claim_token"], now)
+        )
+        if updated.rowcount == 1:
+            event(c, row["id"], "task.recovered",
+                  {"status": new_status, "attempt": row["attempts"]})
+            recovered += 1
+    return recovered
+
+
+def finish_claim(c, tid, token, result=None, error=None):
+    """Fence completion so an obsolete worker cannot overwrite a newer claim."""
+    status = "failed" if error is not None else "succeeded"
+    updated = c.execute(
+        "UPDATE tasks SET status=?,result=?,error=?,claim_token=NULL,"
+        "lease_expires_at=NULL,updated_at=? "
+        "WHERE id=? AND status='running' AND claim_token=?",
+        (status, json.dumps(result) if result is not None else None,
+         error, time.time(), tid, token)
+    )
+    if updated.rowcount != 1:
+        return False
+    event(c, tid, "task.failed" if error is not None else "task.succeeded",
+          {"error_type": "execution"} if error is not None else {"mode": "plan_only"})
+    return True
+
+
 def claim_queued_task(c):
     """Atomically claim one queued task inside the caller's transaction.
 
@@ -186,16 +265,18 @@ def claim_queued_task(c):
 
     tid = row["id"]
     attempt = row["attempts"] + 1
+    now = database_epoch(c)
+    token = uuid.uuid4().hex
     updated = c.execute(
-        "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=? "
-        "WHERE id=? AND status='queued'",
-        (time.time(), tid)
+        "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=?,"
+        "claim_token=?,lease_expires_at=? WHERE id=? AND status='queued'",
+        (now, token, now + LEASE_SECONDS, tid)
     )
     if updated.rowcount != 1:
         return None
 
     event(c, tid, "task.started", {"attempt": attempt})
-    return {"id": tid, "attempt": attempt}
+    return {"id": tid, "attempt": attempt, "claim_token": token}
 
 
 class API(BaseHTTPRequestHandler):
@@ -284,8 +365,11 @@ class API(BaseHTTPRequestHandler):
                 now = time.time()
                 status = "queued" if risk == "green" else "awaiting_approval"
                 with db() as c:
-                    c.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                              (tid, title, typ, json.dumps(payload), status, risk, None, None, 0, now, now))
+                    c.execute(
+                        "INSERT INTO tasks(id,title,task_type,payload,status,risk,result,error,attempts,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (tid, title, typ, json.dumps(payload), status, risk, None, None, 0, now, now)
+                    )
                     event(c, tid, "task.created", {"risk": risk, "status": status})
                     if status == "awaiting_approval":
                         c.execute("INSERT INTO approvals VALUES(?,?,?,?,?,?,?)",
@@ -298,6 +382,7 @@ class API(BaseHTTPRequestHandler):
                     # Serialize SQLite claimers; PostgreSQL additionally locks
                     # the selected row with FOR UPDATE SKIP LOCKED.
                     c.execute("BEGIN IMMEDIATE")
+                    recover_expired_tasks(c)
                     claim = claim_queued_task(c)
                     if claim is None:
                         c.commit()
@@ -309,14 +394,11 @@ class API(BaseHTTPRequestHandler):
                     result = plan(task["payload"])
                 except Exception as e:
                     with db() as c:
-                        c.execute("UPDATE tasks SET status='failed',error=?,updated_at=? WHERE id=?",
-                                  (f"{type(e).__name__}: {e}"[:500], time.time(), tid))
-                        event(c, tid, "task.failed", {"error_type": type(e).__name__})
+                        finish_claim(c, tid, claim["claim_token"],
+                                     error=f"{type(e).__name__}: {e}"[:500])
                 else:
                     with db() as c:
-                        c.execute("UPDATE tasks SET status='succeeded',result=?,error=NULL,updated_at=? WHERE id=?",
-                                  (json.dumps(result), time.time(), tid))
-                        event(c, tid, "task.succeeded", {"mode": "plan_only"})
+                        finish_claim(c, tid, claim["claim_token"], result=result)
                 return self.send_json(200, {"task": self.get_task(tid)})
             if p.startswith("/v1/tasks/") and p.endswith("/approval"):
                 tid = p.strip("/").split("/")[2]

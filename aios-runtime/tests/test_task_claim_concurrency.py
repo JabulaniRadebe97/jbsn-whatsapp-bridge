@@ -52,7 +52,9 @@ class TaskClaimConcurrencyTests(unittest.TestCase):
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                lease_expires_at REAL,
+                claim_token TEXT
             );
             CREATE TABLE events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,11 +71,13 @@ class TaskClaimConcurrencyTests(unittest.TestCase):
 
     def test_postgres_claim_uses_skip_locked(self):
         fake = FakeConnection()
-        with patch.object(runtime, "USE_POSTGRES", True):
+        with patch.object(runtime, "USE_POSTGRES", True), patch.object(runtime, "database_epoch", return_value=1000.0):
             claim = runtime.claim_queued_task(fake)
         select_sql = next(s for s in fake.sql if s.lstrip().upper().startswith("SELECT"))
         self.assertIn("FOR UPDATE SKIP LOCKED", select_sql.upper())
-        self.assertEqual(claim, {"id": "task-1", "attempt": 1})
+        self.assertEqual(claim["id"], "task-1")
+        self.assertEqual(claim["attempt"], 1)
+        self.assertTrue(claim["claim_token"])
         self.assertTrue(any("UPDATE tasks SET status='running'" in s for s in fake.sql))
         self.assertTrue(any("INSERT INTO events" in s for s in fake.sql))
 
