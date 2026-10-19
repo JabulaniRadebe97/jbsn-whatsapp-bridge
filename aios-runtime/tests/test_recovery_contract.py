@@ -85,6 +85,30 @@ class TaskRecoveryTests(unittest.TestCase):
         self.assertEqual(tuple(row), ("queued", None, None))
         self.assertEqual([r["event_type"] for r in events], ["task.recovered"])
 
+    def test_recovery_rolls_back_task_update_if_audit_event_fails(self):
+        self.add_task("rollback", "running", lease=10, token="original-token")
+        self.conn.execute("""
+            CREATE TRIGGER reject_recovery_event
+            BEFORE INSERT ON events
+            WHEN NEW.event_type = 'task.recovered'
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated audit write failure');
+            END;
+        """)
+        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        with self.assertRaises(sqlite3.IntegrityError):
+            runtime.recover_expired_tasks(self.conn, now=20)
+        self.conn.rollback()
+        row = self.conn.execute(
+            "SELECT status,claim_token,lease_expires_at FROM tasks WHERE id='rollback'"
+        ).fetchone()
+        event_count = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE task_id='rollback'"
+        ).fetchone()[0]
+        self.assertEqual(tuple(row), ("running", "original-token", 10))
+        self.assertEqual(event_count, 0)
+
     def test_live_and_legacy_unleased_tasks_are_not_recovered(self):
         self.add_task("live", "running", lease=30, token="live-token")
         self.add_task("legacy", "running", lease=None, token=None)
