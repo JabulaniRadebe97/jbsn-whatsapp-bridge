@@ -52,6 +52,17 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
         with cls.psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
 
+    def setUp(self):
+        # Tests share one isolated schema; clear rows so ordering cannot leak
+        # state from the PostgreSQL recovery test into the claim-lock test.
+        conn = self.connect_in_schema()
+        try:
+            conn.execute("DELETE FROM events")
+            conn.execute("DELETE FROM tasks")
+            conn.commit()
+        finally:
+            conn.close()
+
     def connect_in_schema(self):
         conn = self.psycopg.connect(DSN, row_factory=type(self).dict_row)
         conn.execute(f'SET search_path TO "{self.schema}"')
