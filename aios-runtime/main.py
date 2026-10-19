@@ -48,6 +48,17 @@ def configured_worker_poll_seconds(value=None):
 WORKER_POLL_SECONDS = configured_worker_poll_seconds()
 WORKER_ENABLED = os.environ.get("JBSN_AUTOWORKER_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
+# In-process diagnostics only; never expose task payloads, exception messages, or secrets.
+WORKER_STATE_LOCK = threading.Lock()
+WORKER_STATE = {
+    "running": False,
+    "started_at": None,
+    "last_iteration_at": None,
+    "last_task_at": None,
+    "last_error_type": None,
+    "tasks_processed": 0,
+}
+
 
 class PgCursor:
     def __init__(self, cursor):
@@ -327,20 +338,34 @@ def run_one_task():
 
 def worker_loop():
     """Continuously process allowlisted tasks when explicitly enabled by configuration."""
+    with WORKER_STATE_LOCK:
+        WORKER_STATE["running"] = True
+        WORKER_STATE["started_at"] = time.time()
     print(f"[JBSN-AIOS] background worker enabled; poll={WORKER_POLL_SECONDS}s; registry=plan-only")
     while True:
         try:
             task = run_one_task()
+            with WORKER_STATE_LOCK:
+                WORKER_STATE["last_iteration_at"] = time.time()
+                WORKER_STATE["last_error_type"] = None
+                if task is not None:
+                    WORKER_STATE["last_task_at"] = time.time()
+                    WORKER_STATE["tasks_processed"] += 1
             if task is None:
                 time.sleep(WORKER_POLL_SECONDS)
         except Exception as exc:
             # Keep the service alive, but avoid printing payloads or credentials.
+            with WORKER_STATE_LOCK:
+                WORKER_STATE["last_iteration_at"] = time.time()
+                WORKER_STATE["last_error_type"] = type(exc).__name__
             print(f"[JBSN-AIOS] background worker iteration failed: {type(exc).__name__}")
             time.sleep(WORKER_POLL_SECONDS)
 
 
 def health_payload(status, database):
     """Expose non-secret runtime readiness and configured worker capabilities."""
+    with WORKER_STATE_LOCK:
+        worker_state = dict(WORKER_STATE)
     return {
         "service": "jbsn-aios-core",
         "version": VERSION,
@@ -352,6 +377,7 @@ def health_payload(status, database):
             "enabled": WORKER_ENABLED,
             "poll_seconds": WORKER_POLL_SECONDS,
             "registry": ["plan"],
+            **worker_state,
         },
     }
 

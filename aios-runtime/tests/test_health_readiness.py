@@ -22,8 +22,12 @@ class HealthReadinessTests(unittest.TestCase):
         self.assertTrue(payload["worker"]["enabled"])
         self.assertEqual(payload["worker"]["poll_seconds"], 5)
         self.assertEqual(payload["worker"]["registry"], ["plan"])
+        self.assertIn("running", payload["worker"])
+        self.assertIn("tasks_processed", payload["worker"])
+        self.assertIn("last_error_type", payload["worker"])
         self.assertNotIn("token", payload)
         self.assertNotIn("DATABASE_URL", payload)
+        self.assertNotIn("payload", payload["worker"])
 
     def test_degraded_health_still_reports_worker_as_configured(self):
         with patch.object(runtime, "WORKER_ENABLED", False), \
@@ -35,6 +39,8 @@ class HealthReadinessTests(unittest.TestCase):
         self.assertEqual(payload["status"], "degraded")
         self.assertFalse(payload["worker"]["enabled"])
         self.assertEqual(payload["worker"]["registry"], ["plan"])
+        self.assertFalse(payload["worker"]["running"])
+        self.assertEqual(payload["worker"]["tasks_processed"], 0)
 
 
 if __name__ == "__main__":
