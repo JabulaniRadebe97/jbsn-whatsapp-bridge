@@ -78,7 +78,9 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
                 # worker; PgConnection translates BEGIN IMMEDIATE to BEGIN for PostgreSQL.
                 first_runtime.execute("BEGIN IMMEDIATE")
                 first_claim = self.runtime.claim_queued_task(first_runtime)
-                self.assertEqual(first_claim, {"id": "one-task", "attempt": 1})
+                self.assertEqual(first_claim["id"], "one-task")
+                self.assertEqual(first_claim["attempt"], 1)
+                self.assertTrue(first_claim["claim_token"])
 
                 second_runtime.execute("BEGIN IMMEDIATE")
                 second_claim = self.runtime.claim_queued_task(second_runtime)
