@@ -32,7 +32,9 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
                     status TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     created_at DOUBLE PRECISION NOT NULL,
-                    updated_at DOUBLE PRECISION NOT NULL
+                    updated_at DOUBLE PRECISION NOT NULL,
+                    lease_expires_at DOUBLE PRECISION,
+                    claim_token TEXT
                 )
             """)
             conn.execute("""
