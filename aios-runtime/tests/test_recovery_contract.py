@@ -58,6 +58,24 @@ class TaskRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     runtime.configured_lease_seconds(value)
 
+    def test_claim_lease_deadline_uses_database_clock(self):
+        self.add_task("clocked", "queued", attempts=0)
+        with patch.object(runtime, "database_epoch", return_value=1000.0):
+            claim = runtime.claim_queued_task(self.conn)
+        self.assertIsNotNone(claim)
+        row = self.conn.execute(
+            "SELECT lease_expires_at FROM tasks WHERE id='clocked'"
+        ).fetchone()
+        self.assertEqual(row["lease_expires_at"], 1000.0 + runtime.LEASE_SECONDS)
+
+    def test_recovery_defaults_to_database_clock(self):
+        self.add_task("db-clock-expired", "running", lease=1000.0, token="expired")
+        with patch.object(runtime, "database_epoch", return_value=1001.0):
+            recovered = runtime.recover_expired_tasks(self.conn)
+        self.assertEqual(recovered, 1)
+        row = self.conn.execute("SELECT status FROM tasks WHERE id='db-clock-expired'").fetchone()
+        self.assertEqual(row["status"], "queued")
+
     def test_expired_lease_requeues_and_records_event(self):
         self.add_task("expired", "running", lease=10, token="old")
         recovered = runtime.recover_expired_tasks(self.conn, now=20)
