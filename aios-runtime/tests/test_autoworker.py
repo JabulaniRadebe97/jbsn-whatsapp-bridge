@@ -87,10 +87,7 @@ class AutoWorkerTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): return False
             def read(self): return json.dumps(response).encode("utf-8")
-        with patch.object(runtime, "GEMINI_PROXY_URL", "https://script.google.com/macros/s/example/exec"), \\
-             patch.object(runtime, "GEMINI_PROXY_TOKEN", "test-proxy-token"), \\
-             patch.object(runtime.urllib.request, "urlopen", return_value=FakeResponse()) as fetch, \\
-             patch.dict(os.environ, {}, clear=True):
+        with patch.object(runtime, "GEMINI_PROXY_URL", "https://script.google.com/macros/s/example/exec") as proxy_url, patch.object(runtime, "GEMINI_PROXY_TOKEN", "test-proxy-token") as proxy_token, patch.object(runtime.urllib.request, "urlopen", return_value=FakeResponse()) as fetch, patch.dict(os.environ, {}, clear=True):
             result = runtime.gemini_business_plan({"objective": "Build JBSN Creative"})
         self.assertEqual(result["provider"], "google_gemini_via_apps_script")
         self.assertEqual(result["plan"]["summary"], "Proxy plan")
