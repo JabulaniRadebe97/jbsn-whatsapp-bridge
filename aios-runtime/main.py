@@ -4,6 +4,7 @@ import os
 import secrets
 import sqlite3
 import time
+import threading
 import uuid
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,22 @@ def configured_lease_seconds(value=None):
 
 LEASE_SECONDS = configured_lease_seconds()
 MAX_ATTEMPTS = 3
+
+
+def configured_worker_poll_seconds(value=None):
+    """Validate the background worker polling interval (1–60 seconds)."""
+    raw = os.environ.get("JBSN_WORKER_POLL_SECONDS", "5") if value is None else value
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("JBSN_WORKER_POLL_SECONDS must be an integer between 1 and 60") from exc
+    if not 1 <= seconds <= 60:
+        raise ValueError("JBSN_WORKER_POLL_SECONDS must be an integer between 1 and 60")
+    return seconds
+
+
+WORKER_POLL_SECONDS = configured_worker_poll_seconds()
+WORKER_ENABLED = os.environ.get("JBSN_AUTOWORKER_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 class PgCursor:
@@ -279,6 +296,49 @@ def claim_queued_task(c):
     return {"id": tid, "attempt": attempt, "claim_token": token}
 
 
+def run_one_task():
+    """Claim and execute one allowlisted task. The current registry contains plan only."""
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        recover_expired_tasks(c)
+        claim = claim_queued_task(c)
+        if claim is None:
+            c.commit()
+            return None
+        tid = claim["id"]
+        c.commit()
+    with db() as c:
+        row = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    task = serial(row)
+    try:
+        if task["task_type"] != "plan":
+            raise ValueError("task_type is not enabled in the safe worker registry")
+        result = plan(task["payload"])
+    except Exception as exc:
+        with db() as c:
+            finish_claim(c, tid, claim["claim_token"], error=f"{type(exc).__name__}: {exc}"[:500])
+    else:
+        with db() as c:
+            finish_claim(c, tid, claim["claim_token"], result=result)
+    with db() as c:
+        row = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    return serial(row)
+
+
+def worker_loop():
+    """Continuously process allowlisted tasks when explicitly enabled by configuration."""
+    print(f"[JBSN-AIOS] background worker enabled; poll={WORKER_POLL_SECONDS}s; registry=plan-only")
+    while True:
+        try:
+            task = run_one_task()
+            if task is None:
+                time.sleep(WORKER_POLL_SECONDS)
+        except Exception as exc:
+            # Keep the service alive, but avoid printing payloads or credentials.
+            print(f"[JBSN-AIOS] background worker iteration failed: {type(exc).__name__}")
+            time.sleep(WORKER_POLL_SECONDS)
+
+
 class API(BaseHTTPRequestHandler):
     server_version = "JBSN-AIOS-Core/0.2"
 
@@ -378,28 +438,7 @@ class API(BaseHTTPRequestHandler):
                     row = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
                 return self.send_json(201, serial(row))
             if p == "/v1/worker/run-one":
-                with db() as c:
-                    # Serialize SQLite claimers; PostgreSQL additionally locks
-                    # the selected row with FOR UPDATE SKIP LOCKED.
-                    c.execute("BEGIN IMMEDIATE")
-                    recover_expired_tasks(c)
-                    claim = claim_queued_task(c)
-                    if claim is None:
-                        c.commit()
-                        return self.send_json(200, {"task": None})
-                    tid = claim["id"]
-                    c.commit()
-                task = self.get_task(tid)
-                try:
-                    result = plan(task["payload"])
-                except Exception as e:
-                    with db() as c:
-                        finish_claim(c, tid, claim["claim_token"],
-                                     error=f"{type(e).__name__}: {e}"[:500])
-                else:
-                    with db() as c:
-                        finish_claim(c, tid, claim["claim_token"], result=result)
-                return self.send_json(200, {"task": self.get_task(tid)})
+                return self.send_json(200, {"task": run_one_task()})
             if p.startswith("/v1/tasks/") and p.endswith("/approval"):
                 tid = p.strip("/").split("/")[2]
                 decision = str(b.get("decision", ""))
@@ -447,4 +486,8 @@ if __name__ == "__main__":
     if not TOKEN:
         print("WARNING: API token missing; authenticated endpoints fail closed")
     print(f"JBSN AI OS Core Runtime {VERSION} listening on {host}:{port}")
+    if WORKER_ENABLED:
+        threading.Thread(target=worker_loop, name="jbsn-aios-worker", daemon=True).start()
+    else:
+        print("[JBSN-AIOS] background worker disabled; set JBSN_AUTOWORKER_ENABLED=true to enable plan-only processing")
     ThreadingHTTPServer((host, port), API).serve_forever()
