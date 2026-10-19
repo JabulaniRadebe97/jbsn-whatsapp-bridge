@@ -79,6 +79,9 @@ def db():
         wrapped = PgConnection(conn)
         try:
             yield wrapped
+            # The db() context manager owns the transaction; commit successful
+            # operations (including init_db DDL) before closing the connection.
+            wrapped.commit()
         except Exception:
             wrapped.rollback()
             raise
