@@ -21,7 +21,7 @@ class HealthReadinessTests(unittest.TestCase):
         self.assertEqual(payload["database"], "postgresql")
         self.assertTrue(payload["worker"]["enabled"])
         self.assertEqual(payload["worker"]["poll_seconds"], 5)
-        self.assertEqual(payload["worker"]["registry"], ["plan"])
+        self.assertEqual(payload["worker"]["registry"], ["plan", "business_plan"])
         self.assertIn("running", payload["worker"])
         self.assertIn("tasks_processed", payload["worker"])
         self.assertIn("last_error_type", payload["worker"])
@@ -38,7 +38,7 @@ class HealthReadinessTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "degraded")
         self.assertFalse(payload["worker"]["enabled"])
-        self.assertEqual(payload["worker"]["registry"], ["plan"])
+        self.assertEqual(payload["worker"]["registry"], ["plan", "business_plan"])
         self.assertFalse(payload["worker"]["running"])
         self.assertEqual(payload["worker"]["tasks_processed"], 0)
 

@@ -58,6 +58,27 @@ class AutoWorkerTests(unittest.TestCase):
             ).fetchall()]
         self.assertEqual(events, ["task.started", "task.succeeded"])
 
+    def test_gemini_business_plan_requires_secret(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY is not configured"):
+                runtime.gemini_business_plan({"objective": "Build JBSN Creative"})
+
+    def test_gemini_business_plan_parses_valid_json(self):
+        response = {"candidates": [{"content": {"parts": [{"text": json.dumps({
+            "summary": "Test plan", "assumptions": [], "steps": ["step one"],
+            "acceptance_criteria": ["criterion"], "risks": [], "approvals_required": []
+        })}]}}]}
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps(response).encode("utf-8")
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+             patch.object(runtime.urllib.request, "urlopen", return_value=FakeResponse()):
+            result = runtime.gemini_business_plan({"objective": "Build JBSN Creative"})
+        self.assertEqual(result["provider"], "google_gemini")
+        self.assertEqual(result["mode"], "gemini_business_plan_only")
+        self.assertIn("no code", result["execution_notice"])
+
     def test_worker_does_not_process_tasks_waiting_for_approval(self):
         self.create_task(risk="amber")
         self.assertIsNone(runtime.run_one_task())
