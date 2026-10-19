@@ -73,7 +73,9 @@ class TaskClaimConcurrencyTests(unittest.TestCase):
             claim = runtime.claim_queued_task(fake)
         select_sql = next(s for s in fake.sql if s.lstrip().upper().startswith("SELECT"))
         self.assertIn("FOR UPDATE SKIP LOCKED", select_sql.upper())
-        self.assertEqual(claim, {"id": "task-1", "attempt": 1})
+        self.assertEqual(claim["id"], "task-1")
+        self.assertEqual(claim["attempt"], 1)
+        self.assertTrue(claim["claim_token"])
         self.assertTrue(any("UPDATE tasks SET status='running'" in s for s in fake.sql))
         self.assertTrue(any("INSERT INTO events" in s for s in fake.sql))
 
