@@ -110,5 +110,59 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
             self.assertEqual(events["count"], 1)
 
 
+    def test_expired_postgres_lease_is_requeued_with_audit_event(self):
+        with patch.object(self.runtime, "USE_POSTGRES", True):
+            setup = self.connect_in_schema()
+            try:
+                setup.execute(
+                    "INSERT INTO tasks(id,status,attempts,created_at,updated_at,lease_expires_at,claim_token) "
+                    "VALUES (%s,'running',1,1,1,%s,%s)",
+                    ("expired-recovery", 10, "expired-token"),
+                )
+                setup.execute(
+                    "INSERT INTO tasks(id,status,attempts,created_at,updated_at,lease_expires_at,claim_token) "
+                    "VALUES (%s,'running',1,1,1,%s,%s)",
+                    ("live-lease", 100, "live-token"),
+                )
+                setup.execute(
+                    "INSERT INTO tasks(id,status,attempts,created_at,updated_at) "
+                    "VALUES (%s,'running',1,1,1)",
+                    ("legacy-unleased",),
+                )
+                setup.commit()
+            finally:
+                setup.close()
+
+            conn = self.connect_in_schema()
+            wrapped = self.runtime.PgConnection(conn)
+            try:
+                wrapped.execute("BEGIN IMMEDIATE")
+                recovered = self.runtime.recover_expired_tasks(wrapped, now=20)
+                conn.commit()
+            finally:
+                conn.close()
+
+            check = self.connect_in_schema()
+            try:
+                rows = check.execute(
+                    "SELECT id,status,claim_token,lease_expires_at FROM tasks ORDER BY id"
+                ).fetchall()
+                events = check.execute(
+                    "SELECT event_type,detail FROM events WHERE task_id=%s ORDER BY id",
+                    ("expired-recovery",),
+                ).fetchall()
+            finally:
+                check.close()
+
+            by_id = {row["id"]: row for row in rows}
+            self.assertEqual(recovered, 1)
+            self.assertEqual(by_id["expired-recovery"]["status"], "queued")
+            self.assertIsNone(by_id["expired-recovery"]["claim_token"])
+            self.assertIsNone(by_id["expired-recovery"]["lease_expires_at"])
+            self.assertEqual(by_id["live-lease"]["status"], "running")
+            self.assertEqual(by_id["legacy-unleased"]["status"], "running")
+            self.assertEqual([event["event_type"] for event in events], ["task.recovered"])
+
+
 if __name__ == "__main__":
     unittest.main()
