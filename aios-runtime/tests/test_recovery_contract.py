@@ -88,6 +88,52 @@ class TaskRecoveryTests(unittest.TestCase):
         self.add_task("cancelled", "cancelled", lease=1, token=None, risk="red")
         self.assertEqual(runtime.recover_expired_tasks(self.conn, now=100), 0)
 
+    def test_successful_completion_clears_lease_and_token(self):
+        self.add_task("done", "running", lease=100, token="current")
+        result = {"mode": "plan_only", "objective": "test"}
+        self.assertTrue(runtime.finish_claim(self.conn, "done", "current", result=result))
+        row = self.conn.execute(
+            "SELECT status,result,claim_token,lease_expires_at FROM tasks WHERE id='done'"
+        ).fetchone()
+        self.assertEqual(row["status"], "succeeded")
+        self.assertEqual(json.loads(row["result"]), result)
+        self.assertIsNone(row["claim_token"])
+        self.assertIsNone(row["lease_expires_at"])
+
+    def test_sqlite_init_migrates_existing_task_table_without_losing_records(self):
+        with patch.object(runtime, "DB_PATH", Path(self._temp_db_path())):
+            old_conn = sqlite3.connect(runtime.DB_PATH)
+            old_conn.executescript("""
+                CREATE TABLE tasks(
+                    id TEXT PRIMARY KEY,title TEXT NOT NULL,task_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,
+                    result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,updated_at REAL NOT NULL
+                );
+                INSERT INTO tasks VALUES(
+                    'legacy','Legacy','plan','{"objective":"keep"}','running',
+                    'green',NULL,NULL,1,1,1
+                );
+            """)
+            old_conn.commit()
+            old_conn.close()
+            runtime.init_db()
+            with sqlite3.connect(runtime.DB_PATH) as migrated:
+                cols = {row[1] for row in migrated.execute("PRAGMA table_info(tasks)")}
+                legacy = migrated.execute(
+                    "SELECT id,status,payload FROM tasks WHERE id='legacy'"
+                ).fetchone()
+            self.assertIn("lease_expires_at", cols)
+            self.assertIn("claim_token", cols)
+            self.assertEqual(legacy, ("legacy", "running", '{"objective":"keep"}'))
+
+    def _temp_db_path(self):
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(prefix="jbsn-recovery-", suffix=".sqlite", delete=False)
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
 
 if __name__ == "__main__":
     unittest.main()
