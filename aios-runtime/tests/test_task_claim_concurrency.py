@@ -71,7 +71,7 @@ class TaskClaimConcurrencyTests(unittest.TestCase):
 
     def test_postgres_claim_uses_skip_locked(self):
         fake = FakeConnection()
-        with patch.object(runtime, "USE_POSTGRES", True):
+        with patch.object(runtime, "USE_POSTGRES", True), patch.object(runtime, "database_epoch", return_value=1000.0):
             claim = runtime.claim_queued_task(fake)
         select_sql = next(s for s in fake.sql if s.lstrip().upper().startswith("SELECT"))
         self.assertIn("FOR UPDATE SKIP LOCKED", select_sql.upper())
