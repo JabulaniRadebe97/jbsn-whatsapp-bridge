@@ -24,6 +24,7 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
         cls.schema = "claim_test_" + uuid.uuid4().hex[:16]
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f'CREATE SCHEMA "{cls.schema}"')
+            conn.execute(f'SET search_path TO "{cls.schema}"')
             conn.execute("""
                 CREATE TABLE tasks (
                     id TEXT PRIMARY KEY,
