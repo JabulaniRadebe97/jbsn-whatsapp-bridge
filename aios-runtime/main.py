@@ -162,6 +162,42 @@ def plan(payload):
     }
 
 
+def claim_queued_task(c):
+    """Atomically claim one queued task inside the caller's transaction.
+
+    PostgreSQL workers skip rows already locked by another worker. SQLite uses
+    the caller's BEGIN IMMEDIATE transaction to serialize competing claimers.
+    The status transition, attempt increment, and start event stay in one
+    transaction so a task cannot be partially claimed.
+    """
+    if USE_POSTGRES:
+        row = c.execute(
+            "SELECT * FROM tasks WHERE status='queued' "
+            "ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1"
+        ).fetchone()
+    else:
+        row = c.execute(
+            "SELECT * FROM tasks WHERE status='queued' "
+            "ORDER BY created_at, id LIMIT 1"
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    tid = row["id"]
+    attempt = row["attempts"] + 1
+    updated = c.execute(
+        "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=? "
+        "WHERE id=? AND status='queued'",
+        (time.time(), tid)
+    )
+    if updated.rowcount != 1:
+        return None
+
+    event(c, tid, "task.started", {"attempt": attempt})
+    return {"id": tid, "attempt": attempt}
+
+
 class API(BaseHTTPRequestHandler):
     server_version = "JBSN-AIOS-Core/0.2"
 
@@ -259,15 +295,14 @@ class API(BaseHTTPRequestHandler):
                 return self.send_json(201, serial(row))
             if p == "/v1/worker/run-one":
                 with db() as c:
+                    # Serialize SQLite claimers; PostgreSQL additionally locks
+                    # the selected row with FOR UPDATE SKIP LOCKED.
                     c.execute("BEGIN IMMEDIATE")
-                    row = c.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
-                    if row is None:
+                    claim = claim_queued_task(c)
+                    if claim is None:
                         c.commit()
                         return self.send_json(200, {"task": None})
-                    tid = row["id"]
-                    c.execute("UPDATE tasks SET status='running',attempts=attempts+1,updated_at=? WHERE id=?",
-                              (time.time(), tid))
-                    event(c, tid, "task.started", {"attempt": row["attempts"] + 1})
+                    tid = claim["id"]
                     c.commit()
                 task = self.get_task(tid)
                 try:
