@@ -339,6 +339,23 @@ def worker_loop():
             time.sleep(WORKER_POLL_SECONDS)
 
 
+def health_payload(status, database):
+    """Expose non-secret runtime readiness and configured worker capabilities."""
+    return {
+        "service": "jbsn-aios-core",
+        "version": VERSION,
+        "status": status,
+        "mode": "safe-bootstrap",
+        "database": database,
+        "persistent_storage_configured": USE_POSTGRES or bool(os.environ.get("JBSN_DB_PATH")),
+        "worker": {
+            "enabled": WORKER_ENABLED,
+            "poll_seconds": WORKER_POLL_SECONDS,
+            "registry": ["plan"],
+        },
+    }
+
+
 class API(BaseHTTPRequestHandler):
     server_version = "JBSN-AIOS-Core/0.2"
 
@@ -379,12 +396,10 @@ class API(BaseHTTPRequestHandler):
                 with db() as c:
                     c.execute("SELECT 1")
             except Exception:
-                return self.send_json(503, {"service": "jbsn-aios-core", "version": VERSION,
-                                            "status": "degraded", "database": "unavailable"})
-            return self.send_json(200, {"service": "jbsn-aios-core", "version": VERSION,
-                                        "status": "healthy", "mode": "safe-bootstrap",
-                                        "database": "postgresql" if USE_POSTGRES else "sqlite",
-                                        "persistent_storage_configured": USE_POSTGRES or bool(os.environ.get("JBSN_DB_PATH"))})
+                return self.send_json(503, health_payload("degraded", "unavailable"))
+            return self.send_json(200, health_payload(
+                "healthy", "postgresql" if USE_POSTGRES else "sqlite"
+            ))
         if not self.auth():
             return
         if path == "/v1/tasks":
