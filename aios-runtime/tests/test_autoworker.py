@@ -60,7 +60,7 @@ class AutoWorkerTests(unittest.TestCase):
 
     def test_gemini_business_plan_requires_secret(self):
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY is not configured"):
+            with self.assertRaisesRegex(RuntimeError, "Configure JBSN_GEMINI_PROXY_URL"):
                 runtime.gemini_business_plan({"objective": "Build JBSN Creative"})
 
     def test_gemini_business_plan_parses_valid_json(self):
@@ -78,6 +78,22 @@ class AutoWorkerTests(unittest.TestCase):
         self.assertEqual(result["provider"], "google_gemini")
         self.assertEqual(result["mode"], "gemini_business_plan_only")
         self.assertIn("no code", result["execution_notice"])
+
+    def test_gemini_business_plan_uses_apps_script_proxy_without_runtime_key(self):
+        plan = {"summary": "Proxy plan", "assumptions": [], "steps": ["step"],
+                "acceptance_criteria": ["pass"], "risks": [], "approvals_required": []}
+        response = {"ok": True, "provider": "google_gemini", "model": "gemini-2.5-flash", "plan": plan}
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps(response).encode("utf-8")
+        with patch.object(runtime, "GEMINI_PROXY_URL", "https://script.google.com/macros/s/example/exec") as proxy_url, patch.object(runtime, "GEMINI_PROXY_TOKEN", "test-proxy-token") as proxy_token, patch.object(runtime.urllib.request, "urlopen", return_value=FakeResponse()) as fetch, patch.dict(os.environ, {}, clear=True):
+            result = runtime.gemini_business_plan({"objective": "Build JBSN Creative"})
+        self.assertEqual(result["provider"], "google_gemini_via_apps_script")
+        self.assertEqual(result["plan"]["summary"], "Proxy plan")
+        sent = json.loads(fetch.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(sent["action"], "aios_business_plan")
+        self.assertEqual(sent["token"], "test-proxy-token")
 
     def test_worker_does_not_process_tasks_waiting_for_approval(self):
         self.create_task(risk="amber")
