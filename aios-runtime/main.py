@@ -173,7 +173,7 @@ def claim_queued_task(c):
     if USE_POSTGRES:
         row = c.execute(
             "SELECT * FROM tasks WHERE status='queued' "
-            "ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1"
+            "ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED"
         ).fetchone()
     else:
         row = c.execute(
