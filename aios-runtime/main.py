@@ -6,6 +6,8 @@ import sqlite3
 import time
 import threading
 import uuid
+import urllib.request
+import urllib.error
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +17,8 @@ DB_PATH = Path(os.environ.get("JBSN_DB_PATH", str(ROOT / "data" / "jbsn_aios.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL) and os.environ.get("JBSN_DATABASE_BACKEND", "").lower() != "sqlite"
 TOKEN = os.environ.get("JBSN_API_TOKEN", "")
-VERSION = "0.3.0"
+VERSION = "0.4.0"
+GEMINI_MODEL = os.environ.get("JBSN_GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
 
 def configured_lease_seconds(value=None):
     """Return a bounded lease duration; reject unsafe deployment configuration."""
@@ -222,6 +225,49 @@ def plan(payload):
     }
 
 
+def gemini_business_plan(payload):
+    """Generate a structured business operating plan using Gemini; never executes actions."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    objective = str(payload.get("objective", "")).strip()
+    business = str(payload.get("business", "JBSN Creative")).strip()
+    if not objective:
+        raise ValueError("payload.objective is required")
+    prompt = (
+        "You are the planning engine for JBSN AI OS. Produce a practical, testable business plan. "
+        "Do not claim to have executed actions. Identify assumptions, acceptance criteria, risks, "
+        "approvals needed, and measurable next steps. "
+        f"Business: {business}\\nObjective: {objective}\\n"
+        "Return valid JSON with keys: summary, assumptions, steps, acceptance_criteria, risks, approvals_required."
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Gemini provider returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("Gemini provider connection failed") from None
+    try:
+        plan_data = json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        raise RuntimeError("Gemini returned an invalid business-plan response") from None
+    required = ("summary", "steps", "acceptance_criteria", "risks", "approvals_required")
+    if not all(key in plan_data for key in required) or not isinstance(plan_data["steps"], list):
+        raise RuntimeError("Gemini response did not satisfy the business-plan schema")
+    return {
+        "mode": "gemini_business_plan_only", "provider": "google_gemini",
+        "model": GEMINI_MODEL, "business": business, "plan": plan_data,
+        "execution_notice": "Plan generated only; no code, deployments, payments, or external actions were executed."
+    }
+
+
 def recover_expired_tasks(c, now=None):
     """Recover only expired leased tasks. Caller must hold a write transaction."""
     now = database_epoch(c) if now is None else now
@@ -322,9 +368,12 @@ def run_one_task():
         row = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
     task = serial(row)
     try:
-        if task["task_type"] != "plan":
+        if task["task_type"] == "plan":
+            result = plan(task["payload"])
+        elif task["task_type"] == "business_plan":
+            result = gemini_business_plan(task["payload"])
+        else:
             raise ValueError("task_type is not enabled in the safe worker registry")
-        result = plan(task["payload"])
     except Exception as exc:
         with db() as c:
             finish_claim(c, tid, claim["claim_token"], error=f"{type(exc).__name__}: {exc}"[:500])
@@ -376,14 +425,14 @@ def health_payload(status, database):
         "worker": {
             "enabled": WORKER_ENABLED,
             "poll_seconds": WORKER_POLL_SECONDS,
-            "registry": ["plan"],
+            "registry": ["plan", "business_plan"],
             **worker_state,
         },
     }
 
 
 class API(BaseHTTPRequestHandler):
-    server_version = "JBSN-AIOS-Core/0.2"
+    server_version = "JBSN-AIOS-Core/0.4"
 
     def send_json(self, status, obj):
         b = json.dumps(obj).encode()
@@ -456,8 +505,8 @@ class API(BaseHTTPRequestHandler):
                 risk = str(b.get("risk", "green"))
                 if not title:
                     raise ValueError("title is required")
-                if typ != "plan":
-                    raise ValueError("unregistered task_type; only plan is enabled in bootstrap")
+                if typ not in ("plan", "business_plan"):
+                    raise ValueError("unregistered task_type; only plan and business_plan are enabled")
                 if not isinstance(payload, dict):
                     raise ValueError("payload must be an object")
                 if risk not in ("green", "amber", "red"):
