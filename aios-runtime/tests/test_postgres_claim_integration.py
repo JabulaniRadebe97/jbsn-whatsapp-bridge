@@ -50,7 +50,7 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
             conn.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
 
     def connect_in_schema(self):
-        conn = self.psycopg.connect(DSN)
+        conn = self.psycopg.connect(DSN, row_factory=self.dict_row)
         conn.execute(f'SET search_path TO "{self.schema}"')
         conn.commit()
         return conn
