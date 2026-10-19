@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 DSN = os.environ.get("JBSN_TEST_POSTGRES_DSN", "").strip()
 
+
 @unittest.skipUnless(DSN, "set JBSN_TEST_POSTGRES_DSN to run real PostgreSQL integration test")
 class PostgresTaskClaimIntegrationTests(unittest.TestCase):
     @classmethod
@@ -56,8 +57,6 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
         return conn
 
     def test_locked_queued_task_is_skipped_by_second_postgres_worker(self):
-        from unittest.mock import patch
-
         with patch.object(self.runtime, "USE_POSTGRES", True):
             setup = self.connect_in_schema()
             try:
@@ -72,13 +71,17 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
 
             first = self.connect_in_schema()
             second = self.connect_in_schema()
+            first_runtime = self.runtime.PgConnection(first)
+            second_runtime = self.runtime.PgConnection(second)
             try:
-                first.execute("BEGIN")
-                first_claim = self.runtime.claim_queued_task(self.runtime.PgConnection(first))
+                # Exercise the same transaction command used by the production
+                # worker; PgConnection translates BEGIN IMMEDIATE to BEGIN for PostgreSQL.
+                first_runtime.execute("BEGIN IMMEDIATE")
+                first_claim = self.runtime.claim_queued_task(first_runtime)
                 self.assertEqual(first_claim, {"id": "one-task", "attempt": 1})
 
-                second.execute("BEGIN")
-                second_claim = self.runtime.claim_queued_task(self.runtime.PgConnection(second))
+                second_runtime.execute("BEGIN IMMEDIATE")
+                second_claim = self.runtime.claim_queued_task(second_runtime)
                 self.assertIsNone(second_claim, "second worker must skip the row locked by the first worker")
                 second.commit()
                 first.commit()
