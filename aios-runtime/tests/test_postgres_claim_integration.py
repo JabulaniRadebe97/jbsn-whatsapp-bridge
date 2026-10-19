@@ -24,7 +24,6 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
         cls.schema = "claim_test_" + uuid.uuid4().hex[:16]
         with psycopg.connect(DSN, autocommit=True) as conn:
             conn.execute(f'CREATE SCHEMA "{cls.schema}"')
-            conn.execute(f'SET search_path TO "{cls.schema}"')
             conn.execute("""
                 CREATE TABLE tasks (
                     id TEXT PRIMARY KEY,
@@ -52,18 +51,23 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
     def connect_in_schema(self):
         conn = self.psycopg.connect(DSN, row_factory=self.dict_row)
         conn.execute(f'SET search_path TO "{self.schema}"')
+        conn.commit()
         return conn
 
     def test_locked_queued_task_is_skipped_by_second_postgres_worker(self):
         from unittest.mock import patch
 
         with patch.object(self.runtime, "USE_POSTGRES", True):
-            with self.connect_in_schema() as setup:
+            setup = self.connect_in_schema()
+            try:
                 setup.execute(
                     "INSERT INTO tasks(id,status,attempts,created_at,updated_at) "
                     "VALUES (%s,'queued',0,1,1)",
                     ("one-task",),
                 )
+                setup.commit()
+            finally:
+                setup.close()
 
             first = self.connect_in_schema()
             second = self.connect_in_schema()
@@ -81,7 +85,8 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
                 first.close()
                 second.close()
 
-            with self.connect_in_schema() as check:
+            check = self.connect_in_schema()
+            try:
                 row = check.execute(
                     "SELECT status, attempts FROM tasks WHERE id=%s", ("one-task",)
                 ).fetchone()
@@ -89,6 +94,8 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
                     "SELECT COUNT(*) AS count FROM events "
                     "WHERE task_id=%s AND event_type='task.started'", ("one-task",)
                 ).fetchone()
+            finally:
+                check.close()
 
             self.assertEqual(row["status"], "running")
             self.assertEqual(row["attempts"], 1)
