@@ -1,8 +1,8 @@
 name: Gated green-change auto-merge
 
-# This workflow runs only after the existing test workflow succeeds. It never
-# checks out or executes pull-request code. Production-impacting files and
-# unlabelled PRs are deliberately excluded.
+# Runs only after the existing test workflow succeeds. Never checks out or
+# executes pull-request code. Only explicitly labelled, allowlisted changes
+# can be merged.
 on:
   workflow_run:
     workflows: ["Concurrency hardening tests"]
@@ -23,25 +23,36 @@ jobs:
         with:
           script: |
             const run = context.payload.workflow_run;
-            const prs = run.pull_requests || [];
-            if (prs.length !== 1) {
-              core.info('Skipping: expected exactly one associated pull request.');
-              return;
-            }
-            const pr = prs[0];
             const { owner, repo } = context.repo;
             const fullRepo = `${owner}/${repo}`;
-            if (pr.base.ref !== 'jbsn-aios-runtime-bootstrap' ||
-                pr.head.repo?.full_name !== fullRepo) {
-              core.info('Skipping: base branch or repository is not allowlisted.');
+
+            // GitHub's workflow_run payload often omits pull_requests even
+            // for PR-triggered test runs. Resolve the PR from the exact tested
+            // head SHA rather than silently disabling the merge gate.
+            let prs = run.pull_requests || [];
+            if (prs.length === 0) {
+              const open = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open',
+                base: 'jbsn-aios-runtime-bootstrap', per_page: 100
+              });
+              prs = open.filter(pr => pr.head.sha === run.head_sha);
+            }
+            if (prs.length !== 1) {
+              core.info('Skipping: could not identify exactly one open PR for the tested head SHA.');
               return;
             }
 
+            const candidate = prs[0];
             const { data: details } = await github.rest.pulls.get({
-              owner, repo, pull_number: pr.number
+              owner, repo, pull_number: candidate.number
             });
             if (details.state !== 'open' || details.draft) {
               core.info('Skipping: pull request is not open and ready.');
+              return;
+            }
+            if (details.base.ref !== 'jbsn-aios-runtime-bootstrap' ||
+                details.head.repo?.full_name !== fullRepo) {
+              core.info('Skipping: base branch or repository is not allowlisted.');
               return;
             }
             if (!details.labels.some(label => label.name === 'autonomy:green')) {
@@ -50,21 +61,19 @@ jobs:
             }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner, repo, pull_number: pr.number, per_page: 100
+              owner, repo, pull_number: details.number, per_page: 100
             });
             const allowed = /^aios-runtime\/(main\.py|tests\/[^/]+\.py)$/;
-            const forbidden = files.filter(file => !allowed.test(file.filename));
-            if (files.length === 0 || forbidden.length > 0) {
+            if (files.length === 0 || files.some(file => !allowed.test(file.filename))) {
               core.info('Skipping: PR contains files outside the narrow runtime/test allowlist.');
               return;
             }
 
-            // Confirm the exact head still matches the tested workflow run.
+            // Never merge code different from the tested head.
             if (details.head.sha !== run.head_sha) {
               core.info('Skipping: PR head changed after the test run.');
               return;
             }
-
             const checks = await github.rest.checks.listForRef({
               owner, repo, ref: run.head_sha, per_page: 100
             });
@@ -78,7 +87,7 @@ jobs:
             }
 
             await github.rest.pulls.merge({
-              owner, repo, pull_number: pr.number,
+              owner, repo, pull_number: details.number,
               sha: details.head.sha, merge_method: 'squash'
             });
-            core.info(`Merged allowlisted green PR #${pr.number}; Render auto-deploy handles the configured runtime branch.`);
+            core.info(`Merged allowlisted green PR #${details.number} after successful tests.`);
