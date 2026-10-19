@@ -98,9 +98,9 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
             finally:
                 check.close()
 
-            self.assertEqual(row["status"], "running")
-            self.assertEqual(row["attempts"], 1)
-            self.assertEqual(events["count"], 1)
+            self.assertEqual(row[0], "running")
+            self.assertEqual(row[1], 1)
+            self.assertEqual(events[0], 1)
 
 
 if __name__ == "__main__":
