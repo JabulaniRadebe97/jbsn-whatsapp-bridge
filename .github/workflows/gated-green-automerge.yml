@@ -1,0 +1,84 @@
+name: Gated green-change auto-merge
+
+# This workflow runs only after the existing test workflow succeeds. It never
+# checks out or executes pull-request code. Production-impacting files and
+# unlabelled PRs are deliberately excluded.
+on:
+  workflow_run:
+    workflows: ["Concurrency hardening tests"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  gated-automerge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge only explicitly approved, low-risk runtime changes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const prs = run.pull_requests || [];
+            if (prs.length !== 1) {
+              core.info('Skipping: expected exactly one associated pull request.');
+              return;
+            }
+            const pr = prs[0];
+            const { owner, repo } = context.repo;
+            const fullRepo = `${owner}/${repo}`;
+            if (pr.base.ref !== 'jbsn-aios-runtime-bootstrap' ||
+                pr.head.repo?.full_name !== fullRepo) {
+              core.info('Skipping: base branch or repository is not allowlisted.');
+              return;
+            }
+
+            const { data: details } = await github.rest.pulls.get({
+              owner, repo, pull_number: pr.number
+            });
+            if (details.state !== 'open' || details.draft) {
+              core.info('Skipping: pull request is not open and ready.');
+              return;
+            }
+            if (!details.labels.some(label => label.name === 'autonomy:green')) {
+              core.info('Skipping: missing explicit autonomy:green label.');
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100
+            });
+            const allowed = /^aios-runtime\/(main\.py|tests\/[^/]+\.py)$/;
+            const forbidden = files.filter(file => !allowed.test(file.filename));
+            if (files.length === 0 || forbidden.length > 0) {
+              core.info('Skipping: PR contains files outside the narrow runtime/test allowlist.');
+              return;
+            }
+
+            // Confirm the exact head still matches the tested workflow run.
+            if (details.head.sha !== run.head_sha) {
+              core.info('Skipping: PR head changed after the test run.');
+              return;
+            }
+
+            const checks = await github.rest.checks.listForRef({
+              owner, repo, ref: run.head_sha, per_page: 100
+            });
+            const relevant = checks.data.check_runs.filter(check =>
+              check.name === 'test' && check.app?.slug === 'github-actions'
+            );
+            if (relevant.length === 0 ||
+                relevant.some(check => check.status !== 'completed' || check.conclusion !== 'success')) {
+              core.info('Skipping: required test check is missing or not successful.');
+              return;
+            }
+
+            await github.rest.pulls.merge({
+              owner, repo, pull_number: pr.number,
+              sha: details.head.sha, merge_method: 'squash'
+            });
+            core.info(`Merged allowlisted green PR #${pr.number}; Render auto-deploy handles the configured runtime branch.`);
