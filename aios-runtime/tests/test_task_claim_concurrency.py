@@ -38,6 +38,11 @@ class FakeConnection:
 
 
 class TaskClaimConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.backend_patch = patch.object(runtime, "USE_POSTGRES", False)
+        self.backend_patch.start()
+        self.addCleanup(self.backend_patch.stop)
+
     def make_sqlite_db(self, path):
         conn = sqlite3.connect(path, timeout=5)
         conn.row_factory = sqlite3.Row
