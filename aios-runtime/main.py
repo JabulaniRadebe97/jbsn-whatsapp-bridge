@@ -153,6 +153,15 @@ def init_db():
                 c.execute("ALTER TABLE tasks ADD COLUMN claim_token TEXT")
 
 
+def database_epoch(c):
+    """Read epoch time from the database that also stores lease deadlines."""
+    if USE_POSTGRES:
+        row = c.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()
+        return float(row["now"])
+    row = c.execute("SELECT (julianday('now') - 2440587.5) * 86400.0 AS now").fetchone()
+    return float(row["now"])
+
+
 def event(c, task_id, kind, detail):
     c.execute("INSERT INTO events(task_id,event_type,detail,created_at) VALUES(?,?,?,?)", (task_id, kind, json.dumps(detail), time.time()))
 
@@ -187,7 +196,7 @@ def plan(payload):
 
 def recover_expired_tasks(c, now=None):
     """Recover only expired leased tasks. Caller must hold a write transaction."""
-    now = time.time() if now is None else now
+    now = database_epoch(c) if now is None else now
     if USE_POSTGRES:
         rows = c.execute(
             "SELECT id,claim_token,attempts FROM tasks WHERE status='running' "
@@ -256,7 +265,7 @@ def claim_queued_task(c):
 
     tid = row["id"]
     attempt = row["attempts"] + 1
-    now = time.time()
+    now = database_epoch(c)
     token = uuid.uuid4().hex
     updated = c.execute(
         "UPDATE tasks SET status='running',attempts=attempts+1,updated_at=?,"
