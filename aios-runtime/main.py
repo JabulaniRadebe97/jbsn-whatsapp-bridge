@@ -18,7 +18,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL) and os.environ.get("JBSN_DATABASE_BACKEND", "").lower() != "sqlite"
 TOKEN = os.environ.get("JBSN_API_TOKEN", "")
 VERSION = "0.4.0"
-GEMINI_MODEL = os.environ.get("JBSN_GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+GEMINI_MODEL = os.environ.get("JBSN_GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_PROXY_URL = os.environ.get("JBSN_GEMINI_PROXY_URL", "").strip()
+GEMINI_PROXY_TOKEN = os.environ.get("JBSN_GEMINI_PROXY_TOKEN", "").strip()
 
 def configured_lease_seconds(value=None):
     """Return a bounded lease duration; reject unsafe deployment configuration."""
@@ -226,46 +228,67 @@ def plan(payload):
 
 
 def gemini_business_plan(payload):
-    """Generate a structured business operating plan using Gemini; never executes actions."""
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
+    """Generate a structured plan via the existing Apps Script Gemini provider when configured."""
     objective = str(payload.get("objective", "")).strip()
     business = str(payload.get("business", "JBSN Creative")).strip()
     if not objective:
         raise ValueError("payload.objective is required")
-    prompt = (
-        "You are the planning engine for JBSN AI OS. Produce a practical, testable business plan. "
-        "Do not claim to have executed actions. Identify assumptions, acceptance criteria, risks, "
-        "approvals needed, and measurable next steps. "
-        f"Business: {business}\\nObjective: {objective}\\n"
-        "Return valid JSON with keys: summary, assumptions, steps, acceptance_criteria, risks, approvals_required."
-    )
-    body = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-    }).encode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Gemini provider returned HTTP {exc.code}") from None
-    except urllib.error.URLError:
-        raise RuntimeError("Gemini provider connection failed") from None
-    try:
-        plan_data = json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-        raise RuntimeError("Gemini returned an invalid business-plan response") from None
+
+    if GEMINI_PROXY_URL:
+        if not GEMINI_PROXY_TOKEN:
+            raise RuntimeError("JBSN_GEMINI_PROXY_TOKEN is not configured")
+        proxy_body = json.dumps({
+            "action": "aios_business_plan", "token": GEMINI_PROXY_TOKEN,
+            "objective": objective, "business": business, "model": GEMINI_MODEL,
+        }).encode("utf-8")
+        request = urllib.request.Request(GEMINI_PROXY_URL, data=proxy_body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                proxy_result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Apps Script Gemini proxy returned HTTP {exc.code}") from None
+        except urllib.error.URLError:
+            raise RuntimeError("Apps Script Gemini proxy connection failed") from None
+        if not isinstance(proxy_result, dict) or proxy_result.get("ok") is not True:
+            raise RuntimeError("Apps Script Gemini proxy rejected or failed the request")
+        plan_data = proxy_result.get("plan")
+        provider = "google_gemini_via_apps_script"
+        model = str(proxy_result.get("model") or GEMINI_MODEL)
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("Configure JBSN_GEMINI_PROXY_URL and JBSN_GEMINI_PROXY_TOKEN, or GEMINI_API_KEY")
+        prompt = (
+            "You are the planning engine for JBSN AI OS. Produce a practical, testable business plan. "
+            "Do not claim to have executed actions. Identify assumptions, acceptance criteria, risks, "
+            "approvals needed, and measurable next steps. "
+            f"Business: {business}\\nObjective: {objective}\\n"
+            "Return valid JSON with keys: summary, assumptions, steps, acceptance_criteria, risks, approvals_required."
+        )
+        body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}).encode("utf-8")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+        request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Gemini provider returned HTTP {exc.code}") from None
+        except urllib.error.URLError:
+            raise RuntimeError("Gemini provider connection failed") from None
+        try:
+            plan_data = json.loads(raw["candidates"][0]["content"]["parts"][0]["text"])
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            raise RuntimeError("Gemini returned an invalid business-plan response") from None
+        provider, model = "google_gemini", GEMINI_MODEL
+
     required = ("summary", "steps", "acceptance_criteria", "risks", "approvals_required")
-    if not all(key in plan_data for key in required) or not isinstance(plan_data["steps"], list):
+    if not isinstance(plan_data, dict) or not all(key in plan_data for key in required) or not isinstance(plan_data["steps"], list):
         raise RuntimeError("Gemini response did not satisfy the business-plan schema")
-    return {
-        "mode": "gemini_business_plan_only", "provider": "google_gemini",
-        "model": GEMINI_MODEL, "business": business, "plan": plan_data,
-        "execution_notice": "Plan generated only; no code, deployments, payments, or external actions were executed."
-    }
+    return {"mode": "gemini_business_plan_only", "provider": provider, "model": model,
+        "business": business, "plan": plan_data,
+        "execution_notice": "Plan generated only; no code, deployments, payments, or external actions were executed."}
 
 
 def recover_expired_tasks(c, now=None):
