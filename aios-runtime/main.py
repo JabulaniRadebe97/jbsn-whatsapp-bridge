@@ -354,7 +354,6 @@ def health_payload(status, database):
             "registry": ["plan"],
         },
     }
-}
 
 
 class API(BaseHTTPRequestHandler):
