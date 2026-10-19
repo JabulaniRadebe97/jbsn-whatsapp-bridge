@@ -175,5 +175,75 @@ class PostgresTaskClaimIntegrationTests(unittest.TestCase):
             self.assertEqual([event["event_type"] for event in events], ["task.recovered"])
 
 
+    def test_init_db_migrates_legacy_postgres_tasks_without_losing_rows(self):
+        # Replace only this isolated test schema's task table with the pre-lease
+        # schema, then run the real PostgreSQL init_db migration against it.
+        with patch.object(self.runtime, "USE_POSTGRES", True):
+            setup = self.connect_in_schema()
+            try:
+                setup.execute("DROP TABLE tasks")
+                setup.execute("""
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY, title TEXT NOT NULL, task_type TEXT NOT NULL,
+                        payload TEXT NOT NULL, status TEXT NOT NULL, risk TEXT NOT NULL,
+                        result TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+                    )
+                """)
+                setup.execute(
+                    "INSERT INTO tasks(id,title,task_type,payload,status,risk,attempts,created_at,updated_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    ("legacy-row", "Legacy task", "plan", '{"objective":"keep me"}',
+                     "running", "green", 1, 1, 1),
+                )
+                setup.commit()
+            finally:
+                setup.close()
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def isolated_db():
+                conn = self.connect_in_schema()
+                wrapped = self.runtime.PgConnection(conn)
+                try:
+                    yield wrapped
+                    wrapped.commit()
+                except Exception:
+                    wrapped.rollback()
+                    raise
+                finally:
+                    conn.close()
+
+            with patch.object(self.runtime, "db", isolated_db):
+                self.runtime.init_db()
+
+            check = self.connect_in_schema()
+            try:
+                columns = {row["column_name"] for row in check.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=%s AND table_name='tasks'", (self.schema,)
+                ).fetchall()}
+                row = check.execute(
+                    "SELECT id,title,status,attempts,lease_expires_at,claim_token FROM tasks WHERE id=%s",
+                    ("legacy-row",),
+                ).fetchone()
+                approval_table = check.execute(
+                    "SELECT to_regclass(%s) AS name", (self.schema + ".approvals",)
+                ).fetchone()
+            finally:
+                check.close()
+
+            self.assertIn("lease_expires_at", columns)
+            self.assertIn("claim_token", columns)
+            self.assertEqual(row["id"], "legacy-row")
+            self.assertEqual(row["title"], "Legacy task")
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["attempts"], 1)
+            self.assertIsNone(row["lease_expires_at"])
+            self.assertIsNone(row["claim_token"])
+            self.assertIsNotNone(approval_table["name"])
+
+
 if __name__ == "__main__":
     unittest.main()
