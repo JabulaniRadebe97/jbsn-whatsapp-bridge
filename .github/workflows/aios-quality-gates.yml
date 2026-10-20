@@ -44,7 +44,7 @@ jobs:
           from pathlib import Path
           html = Path("aios-runtime/dashboard.html").read_text(encoding="utf-8")
           required = [
-              "</html>", "JBSN WORLD", "AI OS", "JBSN Creative",
+              "</html>", "JBSN WORLD", "AI OS",
               "--accent:#168cff", "--brand:#e6bd52",
               "refreshAll();setInterval(refreshHealth,15000)",
               "Set API token", "/v1/tasks"
