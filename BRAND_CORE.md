@@ -1,6 +1,6 @@
 # JBSN Brand Core — Digital Implementation Standard
 
-**Status:** Working brand standard for the JBSN digital ecosystem  
+**Status:** Master reference — the founder-supplied “JBSN World.png” ecosystem board is the visual source of truth. Preserve its three original brand identities and layouts.  
 **Applies to:** JBSN World, JBSN AI OS™, JBSN Creative™, Command Centre, websites, dashboards, proposals, social profiles and future subsidiary touchpoints.
 
 ## Brand architecture
@@ -22,19 +22,20 @@ The visual tone is professional, ambitious, intelligent, trustworthy and global.
 ## Color tokens
 
 ### JBSN World — corporate identity
-- Deep ink/navy: #070A0F
-- Executive navy: #0D121A
-- Orange-gold accent: #FF9F1C
+- Black / near-black: #070A0F
+- Metallic gold: #D4AF37 (use gold shades visible in the supplied master artwork)
 - White: #F5F7FA
 - Secondary text: #9AA8B7
+- Typography: Montserrat Bold
 
 Use navy/ink as the foundation, orange-gold for emphasis and white for clarity. Preserve the founder-supplied official circular mark and JBSN/WORLD lock-up wherever its original artwork is available; do not redraw or distort that master logo.
 
 ### JBSN AI OS™ — product/interface identity
 - Core background: #070A0F
 - Surface: #0D121A
-- Technical cyan: #00BFFF
-- Parent-brand orange: #FF9F1C
+- Electric blue: #168CFF
+- White: #F5F7FA
+- Typography: Inter Semi Bold
 - Main text: #F5F7FA
 - Muted text: #9AA8B7
 - Success: #55D6A2
@@ -44,7 +45,12 @@ Use navy/ink as the foundation, orange-gold for emphasis and white for clarity. 
 Cyan is the AI OS interface accent; orange-gold is reserved for parent-brand signals, key highlights and important decisions. Do not use cyan as a replacement for JBSN World's orange-gold in corporate collateral.
 
 ### JBSN Creative™
-Keep the separate Creative identity already established for the operating business. Its visual system must be documented and applied independently rather than borrowing the AI OS cyan interface as its main brand color.
+- Core background: #070A0F
+- Purple: #7C3AED
+- Magenta: #FF00E1
+- White: #FFFFFF
+- Typography: Poppins Bold
+- Keep the exact purple geometric play-mark and wordmark treatment shown in the supplied master reference.
 
 ## Typography
 
@@ -61,7 +67,7 @@ Keep the separate Creative identity already established for the operating busine
 3. Keep logo clear space at least the height of the circular mark's inner symbol.
 4. Never stretch, skew, recolor arbitrarily, add effects to, or place a logo on a low-contrast background.
 5. Provide light and dark variants for production use; ensure small-size legibility and a monochrome fallback.
-6. The included SVG emblem is an interface concept, not a replacement for the official master logo artwork.
+6. The supplied “JBSN World.png” ecosystem board is the design authority. SVG concepts and CSS marks must never replace the exact master logo artwork when that artwork can be used.
 
 ## Interface design rules
 
@@ -80,7 +86,8 @@ Keep the separate Creative identity already established for the operating busine
 
 ## Implementation checklist
 
-- [x] Apply the JBSN World / AI OS palette to the AI OS Command Centre.
+- [x] Apply dark executive styling and responsive component tokens to the AI OS Command Centre.
+- [x] Align the compact AI OS emblem and accents closer to the original blue AI mark.
 - [x] Establish consistent interface tokens and responsive component styling in the dashboard.
 - [ ] Replace temporary web-emblem artwork with the exact official logo files where needed.
 - [ ] Apply the same tokens to separate JBSN World and JBSN Creative web properties after their repository/site sources are connected.
