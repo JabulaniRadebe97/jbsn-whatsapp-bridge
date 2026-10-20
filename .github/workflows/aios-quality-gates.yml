@@ -1,0 +1,63 @@
+name: JBSN AI OS quality gates
+
+on:
+  pull_request:
+    branches:
+      - jbsn-aios-runtime-bootstrap
+  push:
+    branches:
+      - jbsn-aios-runtime-bootstrap
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aios-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Runtime and interface validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: python -m compileall -q aios-runtime
+      - name: Validate runtime requirements
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("aios-runtime/requirements.txt")
+          assert p.exists(), "Missing aios-runtime/requirements.txt"
+          assert "psycopg" in p.read_text().lower(), "PostgreSQL driver requirement missing"
+          print("Runtime dependency manifest checked.")
+          PY
+      - name: Validate dashboard contract and original palette
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          html = Path("aios-runtime/dashboard.html").read_text(encoding="utf-8")
+          required = [
+              "</html>", "JBSN WORLD", "AI OS",
+              "--accent:#168cff", "--brand:#e6bd52",
+              "refreshAll();setInterval(refreshHealth,15000)",
+              "Set API token", "/v1/tasks"
+          ]
+          missing = [item for item in required if item not in html]
+          if missing:
+              raise SystemExit("Dashboard contract missing: " + ", ".join(missing))
+          print("Dashboard structure and brand tokens checked.")
+          PY
+      - name: Run Python unit tests if present
+        run: |
+          if find aios-runtime -maxdepth 2 -type f -name 'test_*.py' -print -quit | grep -q .; then
+            python -m unittest discover -s aios-runtime -p 'test_*.py' -v
+          else
+            echo "No runtime unit tests found; syntax and interface contract checks completed."
+          fi
