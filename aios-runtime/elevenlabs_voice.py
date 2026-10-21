@@ -10,7 +10,7 @@ import re
 import urllib.error
 import urllib.request
 
-E164_RE = re.compile(r"^\\+[1-9]\\d{7,14}$")
+E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
 
 def enabled():
