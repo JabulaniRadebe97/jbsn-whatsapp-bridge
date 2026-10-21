@@ -100,3 +100,78 @@ def create_outbound_call(prospect, campaign_approved=False):
     return {"provider": "twilio", "call_sid": payload.get("sid"),
             "status": payload.get("status", "unknown"),
             "to": phone, "mode": "outbound_voice"}
+
+
+import hashlib
+import hmac
+
+
+def validate_twilio_signature(request_url, form_fields, signature):
+    """Validate Twilio's X-Twilio-Signature header using the account auth token."""
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    if not token or not signature or not request_url:
+        return False
+    material = request_url + "".join(
+        str(key) + str(form_fields[key]) for key in sorted(form_fields)
+    )
+    digest = hmac.new(token.encode("utf-8"), material.encode("utf-8"),
+                      hashlib.sha1).digest()
+    expected = base64.b64encode(digest).decode("ascii")
+    return hmac.compare_digest(expected, signature)
+
+
+def build_turn_twiml(speech_result, public_base_url):
+    """Generate a bounded response for the next speech turn; stop requests end the call."""
+    speech = str(speech_result or "").strip()
+    normalized = speech.lower().strip(" .,!?")
+    if not speech:
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<Response><Say voice="Polly.Joanna-Neural">Sorry, I did not catch that. '
+                'I will arrange for a team member to follow up. Goodbye.</Say><Hangup/></Response>')
+    if normalized in {"stop", "unsubscribe", "do not call", "dont call", "remove me", "end call"}:
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<Response><Say voice="Polly.Joanna-Neural">Understood. I will end this call. Goodbye.</Say>'
+                '<Hangup/></Response>')
+    reply = generate_sales_reply(speech)
+    action = _xml_text(str(public_base_url).rstrip("/") + "/voice/turn")
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<Response><Gather input="speech" action="' + action + '" method="POST" '
+            'speechTimeout="auto" timeout="6">'
+            '<Say voice="Polly.Joanna-Neural" language="en-US">' + _xml_text(reply) + '</Say>'
+            '</Gather><Say voice="Polly.Joanna-Neural">I will arrange a follow-up from our team. Goodbye.</Say>'
+            '<Hangup/></Response>')
+
+
+def generate_sales_reply(prospect_speech):
+    """Use Gemini for a constrained voice turn, with a safe human-handoff fallback."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return "Thanks for sharing that. I do not want to give you inaccurate information. I can arrange for a JBSN Creative team member to follow up with you."
+    prompt = (
+        "You are the disclosed AI voice assistant for JBSN Creative, which offers website, "
+        "digital marketing, and AI implementation services. Speak in one or two short natural "
+        "sentences suitable for a phone call. Ask one question at a time. Discover the prospect's "
+        "business problem, explain only these service categories, and offer to arrange a human "
+        "consultation. Do not invent prices, guarantees, client results, or contractual terms. "
+        "Do not claim to be human. If asked to stop, unsubscribe, or not be called, apologize and "
+        "end the call. Prospect said: " + str(prospect_speech)[:1200]
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.35, "maxOutputTokens": 100}
+    }).encode("utf-8")
+    url = "https://generativelanguage.googleapis.com/v1beta/models/" + os.environ.get(
+        "JBSN_GEMINI_MODEL", "gemini-2.5-flash"
+    ) + ":generateContent?key=" + urllib.parse.quote(api_key)
+    request = urllib.request.Request(url, data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text[:500] if text else (
+            "I want to make sure you get accurate information. I can arrange a human follow-up.")
+    except (urllib.error.URLError, urllib.error.HTTPError, KeyError, IndexError,
+            TypeError, json.JSONDecodeError):
+        return ("Thanks for your time. I cannot confirm the details right now, "
+                "so I can arrange for a JBSN Creative team member to follow up.")
