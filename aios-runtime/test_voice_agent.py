@@ -50,6 +50,17 @@ class VoiceAgentSafetyTests(unittest.TestCase):
         self.assertIn("Gather", xml)
         self.assertIn("stop at any time", xml)
 
+    def test_turn_stops_on_phrase_request(self):
+        xml = voice_agent.build_turn_twiml(
+            "Please stop calling me", "https://example.test")
+        self.assertIn("<Hangup/>", xml)
+        self.assertIn("end this call", xml)
+
+    def test_invalid_twilio_signature_is_rejected(self):
+        with patch.dict(os.environ, {"TWILIO_AUTH_TOKEN": "test-token"}, clear=False):
+            self.assertFalse(voice_agent.validate_twilio_signature(
+                "https://example.test/voice/turn", {"SpeechResult": "hello"}, "bad-signature"))
+
     def test_invalid_number_rejected(self):
         env = {"JBSN_VOICE_ENABLED": "true", "JBSN_VOICE_CAMPAIGN_APPROVED": "true"}
         with patch.dict(os.environ, env, clear=False):
