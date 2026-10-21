@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
 import voice_agent
+import departments
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JBSN_DB_PATH", str(ROOT / "data" / "jbsn_aios.db")))
@@ -451,6 +452,8 @@ def health_payload(status, database):
             "enabled": WORKER_ENABLED,
             "poll_seconds": WORKER_POLL_SECONDS,
             "registry": ["plan", "business_plan"],
+            "department_agents_registered": len(departments.DEPARTMENTS),
+            "department_activation": "registered_safe_mode",
             **worker_state,
         },
     }
@@ -517,6 +520,8 @@ class API(BaseHTTPRequestHandler):
             ))
         if not self.auth():
             return
+        if path == "/v1/departments":
+            return self.send_json(200, departments.department_manifest())
         if path == "/v1/tasks":
             with db() as c:
                 rows = c.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT 200").fetchall()
