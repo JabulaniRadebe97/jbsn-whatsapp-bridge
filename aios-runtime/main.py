@@ -668,14 +668,14 @@ class API(BaseHTTPRequestHandler):
                     if prior:
                         return self.send_json(200, {"appointment": dict(prior), "idempotent_replay": True,
                             "external_calendar_connected": False})
-                    try:
-                        c.execute("INSERT INTO appointments(id,start_at,duration_minutes,service,name,email,contact_consent,timezone,status,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                            (appt_id, start_utc.isoformat(), 30, service, name, email, 1, tz_name, "confirmed", idem, now))
-                    except Exception:
-                        existing = c.execute("SELECT id FROM appointments WHERE start_at=? AND status='confirmed'", (start_utc.isoformat(),)).fetchone()
-                        if existing:
-                            return self.send_json(409, {"error": "slot already booked; fetch fresh availability"})
-                        raise
+                    inserted = c.execute("INSERT INTO appointments(id,start_at,duration_minutes,service,name,email,contact_consent,timezone,status,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                        (appt_id, start_utc.isoformat(), 30, service, name, email, 1, tz_name, "confirmed", idem, now))
+                    if inserted.rowcount != 1:
+                        prior = c.execute("SELECT * FROM appointments WHERE idempotency_key=?", (idem,)).fetchone()
+                        if prior:
+                            return self.send_json(200, {"appointment": dict(prior), "idempotent_replay": True,
+                                "external_calendar_connected": False})
+                        return self.send_json(409, {"error": "slot already booked or request already used; fetch fresh availability"})
                     row = c.execute("SELECT * FROM appointments WHERE id=?", (appt_id,)).fetchone()
                 return self.send_json(201, {"appointment": dict(row), "idempotent_replay": False,
                     "external_calendar_connected": False,
