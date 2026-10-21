@@ -68,6 +68,33 @@ class VoiceAgentSafetyTests(unittest.TestCase):
                 voice_agent.validate_call_request(dict(self.prospect, phone="12345"),
                                                   campaign_approved=True)
 
+    def test_booking_intent_starts_explicit_flow(self):
+        with patch.dict(os.environ, {}, clear=False):
+            with voice_agent._BOOKING_SESSION_LOCK:
+                voice_agent._BOOKING_SESSIONS.clear()
+            xml = voice_agent.build_turn_twiml("I'd like to book an appointment", "https://example.test", "CA123")
+            self.assertIn("What name should I put on the booking", xml)
+            with voice_agent._BOOKING_SESSION_LOCK:
+                self.assertEqual(voice_agent._BOOKING_SESSIONS["CA123"]["step"], "name")
+
+    def test_booking_refusal_does_not_create_booking(self):
+        with voice_agent._BOOKING_SESSION_LOCK:
+            voice_agent._BOOKING_SESSIONS.clear()
+            voice_agent._BOOKING_SESSIONS["CA124"] = {"step": "consent", "name": "Test", "email": "test@example.com",
+                "date": "2026-10-28", "time": "14:30", "slot_id": "2026-10-28T14:30:00+02:00"}
+        xml = voice_agent.build_turn_twiml("no", "https://example.test", "CA124")
+        self.assertIn("will not create a booking", xml)
+        with voice_agent._BOOKING_SESSION_LOCK:
+            self.assertNotIn("CA124", voice_agent._BOOKING_SESSIONS)
+
+    def test_stop_clears_booking_session(self):
+        with voice_agent._BOOKING_SESSION_LOCK:
+            voice_agent._BOOKING_SESSIONS["CA125"] = {"step": "email"}
+        xml = voice_agent.build_turn_twiml("stop calling", "https://example.test", "CA125")
+        self.assertIn("<Hangup/>", xml)
+        with voice_agent._BOOKING_SESSION_LOCK:
+            self.assertNotIn("CA125", voice_agent._BOOKING_SESSIONS)
 
 if __name__ == "__main__":
     unittest.main()
+
