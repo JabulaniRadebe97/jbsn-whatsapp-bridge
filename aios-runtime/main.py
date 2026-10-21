@@ -606,7 +606,7 @@ class API(BaseHTTPRequestHandler):
                     xml = voice_agent.build_disclosure_twiml()
                 elif path == "/voice/turn":
                     xml = voice_agent.build_turn_twiml(
-                        fields.get("SpeechResult", ""), public_base)
+                        fields.get("SpeechResult", ""), public_base, fields.get("CallSid", ""))
                 elif path == "/voice/status":
                     self.send_response(204)
                     self.end_headers()
