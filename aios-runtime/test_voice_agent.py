@@ -68,11 +68,6 @@ class VoiceAgentSafetyTests(unittest.TestCase):
                 voice_agent.validate_call_request(dict(self.prospect, phone="12345"),
                                                   campaign_approved=True)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_booking_intent_starts_explicit_flow(self):
         with patch.dict(os.environ, {}, clear=False):
             with voice_agent._BOOKING_SESSION_LOCK:
@@ -99,3 +94,7 @@ if __name__ == "__main__":
         self.assertIn("<Hangup/>", xml)
         with voice_agent._BOOKING_SESSION_LOCK:
             self.assertNotIn("CA125", voice_agent._BOOKING_SESSIONS)
+
+if __name__ == "__main__":
+    unittest.main()
+
