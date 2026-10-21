@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 import voice_agent
 import elevenlabs_voice
+import elevenlabs_twilio_fallback
 import departments
 
 ROOT = Path(__file__).resolve().parent
@@ -691,6 +692,12 @@ class API(BaseHTTPRequestHandler):
                 if not isinstance(b.get("prospect"), dict):
                     raise ValueError("prospect object is required")
                 result = elevenlabs_voice.create_outbound_call(
+                    b["prospect"], campaign_approved=(b.get("campaign_approved") is True))
+                return self.send_json(201, result)
+            if p == "/v1/voice/elevenlabs-twilio-fallback-calls":
+                if not isinstance(b.get("prospect"), dict):
+                    raise ValueError("prospect object is required")
+                result = elevenlabs_twilio_fallback.create_outbound_call(
                     b["prospect"], campaign_approved=(b.get("campaign_approved") is True))
                 return self.send_json(201, result)
             if p == "/v1/tasks":
