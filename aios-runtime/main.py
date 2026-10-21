@@ -1,5 +1,6 @@
 """JBSN AI OS Core Runtime bootstrap. Safe, plan-only worker; no arbitrary code execution."""
 import json
+import re
 import os
 import secrets
 import sqlite3
@@ -20,7 +21,7 @@ DB_PATH = Path(os.environ.get("JBSN_DB_PATH", str(ROOT / "data" / "jbsn_aios.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL) and os.environ.get("JBSN_DATABASE_BACKEND", "").lower() != "sqlite"
 TOKEN = os.environ.get("JBSN_API_TOKEN", "")
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 GEMINI_MODEL = os.environ.get("JBSN_GEMINI_MODEL", "gemini-2.5-flash").strip()
 GEMINI_PROXY_URL = os.environ.get("JBSN_GEMINI_PROXY_URL", "").strip()
 GEMINI_PROXY_TOKEN = os.environ.get("JBSN_GEMINI_PROXY_TOKEN", "").strip()
@@ -170,6 +171,12 @@ def init_db():
                 id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL,
                 decision_by TEXT, reason TEXT, created_at DOUBLE PRECISION NOT NULL,
                 decided_at DOUBLE PRECISION)""",
+            """CREATE TABLE IF NOT EXISTS appointments(
+                id TEXT PRIMARY KEY, start_at TEXT NOT NULL UNIQUE, duration_minutes INTEGER NOT NULL,
+                service TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL,
+                contact_consent INTEGER NOT NULL, timezone TEXT NOT NULL, status TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE, created_at DOUBLE PRECISION NOT NULL)""",
+            "CREATE INDEX IF NOT EXISTS idx_appointments_start_status ON appointments(start_at, status)",
         ]
         with db() as c:
             for statement in statements:
@@ -181,7 +188,9 @@ def init_db():
             c.executescript("""CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,title TEXT NOT NULL,task_type TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,result TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL,lease_expires_at REAL,claim_token TEXT);
             CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status,created_at);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT,event_type TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,status TEXT NOT NULL,decision_by TEXT,reason TEXT,created_at REAL NOT NULL,decided_at REAL);""")
+            CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,status TEXT NOT NULL,decision_by TEXT,reason TEXT,created_at REAL NOT NULL,decided_at REAL);
+            CREATE TABLE IF NOT EXISTS appointments(id TEXT PRIMARY KEY,start_at TEXT NOT NULL UNIQUE,duration_minutes INTEGER NOT NULL,service TEXT NOT NULL,name TEXT NOT NULL,email TEXT NOT NULL,contact_consent INTEGER NOT NULL,timezone TEXT NOT NULL,status TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,created_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_appointments_start_status ON appointments(start_at,status);""")
             columns = {r["name"] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
             if "lease_expires_at" not in columns:
                 c.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at REAL")
@@ -509,6 +518,47 @@ class API(BaseHTTPRequestHandler):
             except OSError:
                 self.send_json(503, {"error": "dashboard asset unavailable"})
             return
+        if path == "/v1/booking/availability":
+            if not self.auth():
+                return
+            from datetime import date as _date, datetime as _datetime, time as _time, timedelta as _timedelta, timezone as _timezone
+            from zoneinfo import ZoneInfo
+            query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                day = _date.fromisoformat(query.get("date", [_datetime.now().date().isoformat()])[0])
+                tz_name = query.get("timezone", ["Africa/Johannesburg"])[0]
+                tz = ZoneInfo(tz_name)
+                service = query.get("service", ["discovery"])[0].strip()
+                if not service or len(service) > 80:
+                    raise ValueError("service must be 1-80 characters")
+                local_today = _datetime.now(tz).date()
+                if day < local_today or day > local_today + _timedelta(days=30):
+                    raise ValueError("date must be today through the next 30 days")
+                slots = []
+                if day.weekday() < 5:
+                    for hour in range(9, 17):
+                        for minute in (0, 30):
+                            candidate = _datetime.combine(day, _time(hour, minute), tzinfo=tz)
+                            if candidate <= _datetime.now(tz):
+                                continue
+                            slots.append({"slot_id": candidate.astimezone(_timezone.utc).isoformat(),
+                                          "start_at": candidate.isoformat(), "timezone": tz_name,
+                                          "duration_minutes": 30, "service": service})
+                with db() as c:
+                    rows = c.execute("SELECT start_at FROM appointments WHERE status='confirmed'").fetchall()
+                booked = {str(row["start_at"]) for row in rows}
+                slots = [slot for slot in slots if slot["slot_id"] not in booked]
+                return self.send_json(200, {"source": "JBSN internal booking calendar",
+                    "external_calendar_connected": False, "slots": slots,
+                    "notice": "Internal slots only; Google Calendar or external calendars are not connected."})
+            except (ValueError, KeyError) as exc:
+                return self.send_json(400, {"error": str(exc)})
+        if path == "/v1/booking/appointments":
+            if not self.auth():
+                return
+            with db() as c:
+                rows = c.execute("SELECT id,start_at,duration_minutes,service,name,email,timezone,status,created_at FROM appointments ORDER BY start_at DESC LIMIT 100").fetchall()
+            return self.send_json(200, {"appointments": [dict(row) for row in rows]})
         if path == "/health":
             try:
                 with db() as c:
@@ -579,6 +629,57 @@ class API(BaseHTTPRequestHandler):
         try:
             p = self.path.split("?", 1)[0]
             b = self.body()
+            if p == "/v1/booking/appointments":
+                from datetime import datetime as _datetime, timezone as _timezone
+                from zoneinfo import ZoneInfo
+                name = str(b.get("name", "")).strip()
+                email = str(b.get("email", "")).strip().lower()
+                service = str(b.get("service", "discovery")).strip()
+                tz_name = str(b.get("timezone", "Africa/Johannesburg")).strip()
+                slot_id = str(b.get("slot_id", "")).strip()
+                idem = str(b.get("idempotency_key", "")).strip()
+                if not name or len(name) > 120:
+                    raise ValueError("name is required (maximum 120 characters)")
+                if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email) or len(email) > 254:
+                    raise ValueError("a valid email is required")
+                if not service or len(service) > 80:
+                    raise ValueError("service is required (maximum 80 characters)")
+                if b.get("contact_consent") is not True:
+                    raise ValueError("explicit contact_consent=true is required")
+                if not re.fullmatch(r"[A-Za-z0-9._:-]{8,100}", idem):
+                    raise ValueError("idempotency_key must be 8-100 safe characters")
+                try:
+                    tz = ZoneInfo(tz_name)
+                    start = _datetime.fromisoformat(slot_id.replace("Z", "+00:00"))
+                except Exception:
+                    raise ValueError("slot_id must be ISO-8601 datetime and timezone must be valid")
+                if start.tzinfo is None:
+                    raise ValueError("slot_id must include a timezone offset")
+                start_utc = start.astimezone(_timezone.utc)
+                now_utc = _datetime.now(_timezone.utc)
+                if start_utc <= now_utc or (start_utc - now_utc).total_seconds() > 31 * 86400:
+                    raise ValueError("appointment must be in the future and within 31 days")
+                local = start_utc.astimezone(tz)
+                if local.weekday() >= 5 or local.minute not in (0, 30) or local.second != 0 or not (9 <= local.hour < 17):
+                    raise ValueError("slot must be a weekday 09:00-16:30 in the requested timezone")
+                appt_id, now = str(uuid.uuid4()), time.time()
+                with db() as c:
+                    prior = c.execute("SELECT * FROM appointments WHERE idempotency_key=?", (idem,)).fetchone()
+                    if prior:
+                        return self.send_json(200, {"appointment": dict(prior), "idempotent_replay": True,
+                            "external_calendar_connected": False})
+                    inserted = c.execute("INSERT INTO appointments(id,start_at,duration_minutes,service,name,email,contact_consent,timezone,status,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                        (appt_id, start_utc.isoformat(), 30, service, name, email, 1, tz_name, "confirmed", idem, now))
+                    if inserted.rowcount != 1:
+                        prior = c.execute("SELECT * FROM appointments WHERE idempotency_key=?", (idem,)).fetchone()
+                        if prior:
+                            return self.send_json(200, {"appointment": dict(prior), "idempotent_replay": True,
+                                "external_calendar_connected": False})
+                        return self.send_json(409, {"error": "slot already booked or request already used; fetch fresh availability"})
+                    row = c.execute("SELECT * FROM appointments WHERE id=?", (appt_id,)).fetchone()
+                return self.send_json(201, {"appointment": dict(row), "idempotent_replay": False,
+                    "external_calendar_connected": False,
+                    "notice": "Confirmed in the JBSN internal calendar only; no external invitation was sent."})
             if p == "/v1/voice/calls":
                 if not isinstance(b.get("prospect"), dict):
                     raise ValueError("prospect object is required")
