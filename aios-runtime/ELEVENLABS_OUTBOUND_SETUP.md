@@ -54,3 +54,20 @@ provided.
   sufficient billing/credits. Do not test on real prospects without documented consent.
 - The current integration calls ElevenLabs' documented
   `POST /v1/convai/twilio/outbound-call` endpoint.
+
+## Trial-number fallback (no ElevenLabs phone-number import)
+
+The optional register-call route lets JBSN AIOS create the Twilio call directly and pass ElevenLabs-returned TwiML to Twilio. It avoids the ElevenLabs phone-number import step, but **does not bypass Twilio trial restrictions**, destination verification, regional calling permissions, or billing.
+
+Required Render environment variables:
+- `ELEVENLABS_API_KEY`
+- `ELEVENLABS_AGENT_ID`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_FROM_NUMBER` (E.164, e.g. `+17372508034`)
+- `JBSN_ELEVENLABS_TWILIO_FALLBACK_ENABLED=false` (keep false until configured and verified)
+- `JBSN_ELEVENLABS_CAMPAIGN_APPROVED=false` (keep false until a founder-approved, consented pilot)
+
+Authenticated endpoint: `POST /v1/voice/elevenlabs-twilio-fallback-calls`. Request body matches the existing voice endpoint and requires `campaign_approved: true` plus a prospect object containing E.164 `phone`, `contact_permission: true`, a non-empty `permission_source`, and no opt-out/do-not-call flags.
+
+No calls are initiated by deployment or health checks. Do not enable the flags until credentials, destination verification, lawful calling basis, opt-out controls, and a manually approved test recipient have been verified. Twilio and ElevenLabs usage may incur charges.
