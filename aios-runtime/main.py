@@ -11,6 +11,8 @@ import urllib.error
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
+import voice_agent
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JBSN_DB_PATH", str(ROOT / "data" / "jbsn_aios.db")))
@@ -531,11 +533,53 @@ class API(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/voice/"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 100000:
+                    return self.send_json(413, {"error": "voice callback too large"})
+                raw = self.rfile.read(length) if length else b""
+                fields = {key: values[-1] for key, values in parse_qs(
+                    raw.decode("utf-8"), keep_blank_values=True).items()}
+                public_base = os.environ.get("JBSN_PUBLIC_BASE_URL", "").rstrip("/")
+                callback_url = public_base + self.path
+                if not voice_agent.validate_twilio_signature(
+                    callback_url, fields, self.headers.get("X-Twilio-Signature", "")):
+                    return self.send_json(403, {"error": "invalid Twilio signature"})
+                if path == "/voice/twiml":
+                    xml = voice_agent.build_disclosure_twiml()
+                elif path == "/voice/turn":
+                    xml = voice_agent.build_turn_twiml(
+                        fields.get("SpeechResult", ""), public_base)
+                elif path == "/voice/status":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                else:
+                    return self.send_json(404, {"error": "voice route not found"})
+                payload = xml.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            except Exception as exc:
+                print(f"[JBSN-AIOS] voice callback failed: {type(exc).__name__}")
+                return self.send_json(500, {"error": "voice callback failed"})
         if not self.auth():
             return
         try:
             p = self.path.split("?", 1)[0]
             b = self.body()
+            if p == "/v1/voice/calls":
+                if not isinstance(b.get("prospect"), dict):
+                    raise ValueError("prospect object is required")
+                result = voice_agent.create_outbound_call(
+                    b["prospect"], campaign_approved=(b.get("campaign_approved") is True))
+                return self.send_json(201, result)
             if p == "/v1/tasks":
                 title = str(b.get("title", "")).strip()
                 typ = str(b.get("task_type", ""))
