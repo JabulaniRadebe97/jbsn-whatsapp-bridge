@@ -124,14 +124,16 @@ def build_turn_twiml(speech_result, public_base_url):
     """Generate a bounded response for the next speech turn; stop requests end the call."""
     speech = str(speech_result or "").strip()
     normalized = speech.lower().strip(" .,!?")
+    stop_phrases = ("stop", "unsubscribe", "do not call", "don't call",
+                    "dont call", "remove me", "end call", "stop calling")
+    if any(phrase in normalized for phrase in stop_phrases):
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<Response><Say voice="Polly.Joanna-Neural">Understood. I will end this call. Goodbye.</Say>'
+                '<Hangup/></Response>')
     if not speech:
         return ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<Response><Say voice="Polly.Joanna-Neural">Sorry, I did not catch that. '
                 'I will arrange for a team member to follow up. Goodbye.</Say><Hangup/></Response>')
-    if normalized in {"stop", "unsubscribe", "do not call", "dont call", "remove me", "end call"}:
-        return ('<?xml version="1.0" encoding="UTF-8"?>'
-                '<Response><Say voice="Polly.Joanna-Neural">Understood. I will end this call. Goodbye.</Say>'
-                '<Hangup/></Response>')
     reply = generate_sales_reply(speech)
     action = _xml_text(str(public_base_url).rstrip("/") + "/voice/turn")
     return ('<?xml version="1.0" encoding="UTF-8"?>'
