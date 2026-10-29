@@ -179,6 +179,14 @@ def init_db():
                 contact_consent INTEGER NOT NULL, timezone TEXT NOT NULL, status TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL UNIQUE, created_at DOUBLE PRECISION NOT NULL)""",
             "CREATE INDEX IF NOT EXISTS idx_appointments_start_status ON appointments(start_at, status)",
+            """CREATE TABLE IF NOT EXISTS leads(
+                id TEXT PRIMARY KEY, business_name TEXT NOT NULL, contact_name TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', website TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '', segment TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'new',
+                next_action TEXT NOT NULL DEFAULT '', next_action_at TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '', contact_basis TEXT NOT NULL DEFAULT 'unknown',
+                owner TEXT NOT NULL DEFAULT '', created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL)""",
+            "CREATE INDEX IF NOT EXISTS idx_leads_status_updated ON leads(status, updated_at)",
         ]
         with db() as c:
             for statement in statements:
@@ -192,7 +200,9 @@ def init_db():
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT,event_type TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,status TEXT NOT NULL,decision_by TEXT,reason TEXT,created_at REAL NOT NULL,decided_at REAL);
             CREATE TABLE IF NOT EXISTS appointments(id TEXT PRIMARY KEY,start_at TEXT NOT NULL UNIQUE,duration_minutes INTEGER NOT NULL,service TEXT NOT NULL,name TEXT NOT NULL,email TEXT NOT NULL,contact_consent INTEGER NOT NULL,timezone TEXT NOT NULL,status TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,created_at REAL NOT NULL);
-            CREATE INDEX IF NOT EXISTS idx_appointments_start_status ON appointments(start_at,status);""")
+            CREATE INDEX IF NOT EXISTS idx_appointments_start_status ON appointments(start_at,status);
+            CREATE TABLE IF NOT EXISTS leads(id TEXT PRIMARY KEY,business_name TEXT NOT NULL,contact_name TEXT NOT NULL DEFAULT '',phone TEXT NOT NULL DEFAULT '',email TEXT NOT NULL DEFAULT '',website TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT '',segment TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',next_action TEXT NOT NULL DEFAULT '',next_action_at TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',contact_basis TEXT NOT NULL DEFAULT 'unknown',owner TEXT NOT NULL DEFAULT '',created_at REAL NOT NULL,updated_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_leads_status_updated ON leads(status,updated_at);""")
             columns = {r["name"] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
             if "lease_expires_at" not in columns:
                 c.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at REAL")
@@ -303,6 +313,59 @@ def gemini_business_plan(payload):
     return {"mode": "gemini_business_plan_only", "provider": provider, "model": model,
         "business": business, "plan": plan_data,
         "execution_notice": "Plan generated only; no code, deployments, payments, or external actions were executed."}
+
+
+
+
+LEAD_STATUSES = (
+    "new", "researching", "qualified", "attempt_1", "attempt_2",
+    "callback", "appointment", "proposal", "won", "lost", "disqualified",
+)
+LEAD_CONTACT_BASES = ("unknown", "consent", "existing_customer", "public_business_contact", "not_applicable")
+LEAD_FIELD_LIMITS = {
+    "business_name": 180, "contact_name": 120, "phone": 40, "email": 254,
+    "website": 500, "source": 120, "segment": 120, "next_action": 240,
+    "next_action_at": 80, "notes": 4000, "owner": 120,
+}
+LEAD_MUTABLE_FIELDS = tuple(LEAD_FIELD_LIMITS) + ("status", "contact_basis")
+
+
+def normalize_lead_payload(payload, partial=False):
+    """Validate CRM fields; never triggers contact or outreach."""
+    if not isinstance(payload, dict):
+        raise ValueError("lead payload must be an object")
+    unknown = set(payload) - set(LEAD_MUTABLE_FIELDS)
+    if unknown:
+        raise ValueError("unsupported lead field: " + sorted(unknown)[0])
+    if not partial and not str(payload.get("business_name", "")).strip():
+        raise ValueError("business_name is required")
+    if partial and not payload:
+        raise ValueError("at least one lead field is required")
+    cleaned = {}
+    for key, value in payload.items():
+        if key == "status":
+            status = str(value).strip().lower()
+            if status not in LEAD_STATUSES:
+                raise ValueError("invalid lead status")
+            cleaned[key] = status
+            continue
+        if key == "contact_basis":
+            basis = str(value).strip().lower()
+            if basis not in LEAD_CONTACT_BASES:
+                raise ValueError("invalid contact_basis")
+            cleaned[key] = basis
+            continue
+        if value is None:
+            value = ""
+        if not isinstance(value, (str, int, float)):
+            raise ValueError(f"{key} must be a string")
+        text_value = str(value).strip()
+        if len(text_value) > LEAD_FIELD_LIMITS[key]:
+            raise ValueError(f"{key} exceeds {LEAD_FIELD_LIMITS[key]} characters")
+        if key == "email" and text_value and not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", text_value):
+            raise ValueError("email must be a valid email address")
+        cleaned[key] = text_value
+    return cleaned
 
 
 def recover_expired_tasks(c, now=None):
@@ -572,6 +635,23 @@ class API(BaseHTTPRequestHandler):
             ))
         if not self.auth():
             return
+        if path == "/v1/leads":
+            query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                limit = int(query.get("limit", ["100"])[0])
+                if not 1 <= limit <= 200:
+                    raise ValueError("limit must be between 1 and 200")
+                status = query.get("status", [""])[0].strip().lower()
+                if status and status not in LEAD_STATUSES:
+                    raise ValueError("invalid lead status")
+                with db() as c:
+                    if status:
+                        rows = c.execute("SELECT * FROM leads WHERE status=? ORDER BY updated_at DESC LIMIT ?", (status, limit)).fetchall()
+                    else:
+                        rows = c.execute("SELECT * FROM leads ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+                return self.send_json(200, {"leads": [dict(row) for row in rows], "count": len(rows), "source": "persistent JBSN AIOS database"})
+            except ValueError as exc:
+                return self.send_json(400, {"error": str(exc)})
         if path == "/v1/departments":
             return self.send_json(200, departments.department_manifest())
         if path == "/v1/tasks":
@@ -631,6 +711,28 @@ class API(BaseHTTPRequestHandler):
         try:
             p = self.path.split("?", 1)[0]
             b = self.body()
+            if p == "/v1/leads":
+                lead = normalize_lead_payload(b)
+                lead_id = str(uuid.uuid4())
+                now = time.time()
+                defaults = {
+                    "business_name": "", "contact_name": "", "phone": "", "email": "", "website": "",
+                    "source": "", "segment": "", "status": "new", "next_action": "", "next_action_at": "",
+                    "notes": "", "contact_basis": "unknown", "owner": "",
+                }
+                defaults.update(lead)
+                with db() as c:
+                    c.execute(
+                        "INSERT INTO leads(id,business_name,contact_name,phone,email,website,source,segment,status,next_action,next_action_at,notes,contact_basis,owner,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (lead_id, defaults["business_name"], defaults["contact_name"], defaults["phone"],
+                         defaults["email"], defaults["website"], defaults["source"], defaults["segment"],
+                         defaults["status"], defaults["next_action"], defaults["next_action_at"], defaults["notes"],
+                         defaults["contact_basis"], defaults["owner"], now, now)
+                    )
+                    row = c.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+                    event(c, lead_id, "lead.created", {"status": defaults["status"], "source": defaults["source"]})
+                return self.send_json(201, {"lead": dict(row), "outreach_sent": False})
+
             if p == "/v1/booking/appointments":
                 from datetime import datetime as _datetime, timezone as _timezone
                 from zoneinfo import ZoneInfo
@@ -757,6 +859,33 @@ class API(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"[JBSN-AIOS] internal request failure: {type(e).__name__}")
             return self.send_json(500, {"error": "internal error", "type": type(e).__name__})
+
+    def do_PATCH(self):
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/v1/leads/"):
+            return self.send_json(404, {"error": "not found"})
+        if not self.auth():
+            return
+        try:
+            lead_id = path.rsplit("/", 1)[-1].strip()
+            if not lead_id or len(lead_id) > 80:
+                raise ValueError("invalid lead id")
+            changes = normalize_lead_payload(self.body(), partial=True)
+            now = time.time()
+            assignments = ", ".join(f"{field}=?" for field in changes)
+            values = list(changes.values()) + [now, lead_id]
+            with db() as c:
+                updated = c.execute(f"UPDATE leads SET {assignments},updated_at=? WHERE id=?", values)
+                if updated.rowcount != 1:
+                    return self.send_json(404, {"error": "lead not found"})
+                row = c.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+                event(c, lead_id, "lead.updated", {"fields": sorted(changes.keys()), "status": row["status"]})
+            return self.send_json(200, {"lead": dict(row), "outreach_sent": False})
+        except (ValueError, json.JSONDecodeError) as exc:
+            return self.send_json(400, {"error": str(exc)})
+        except Exception as exc:
+            print(f"[JBSN-AIOS] lead update failed: {type(exc).__name__}")
+            return self.send_json(500, {"error": "internal error"})
 
     def get_task(self, tid):
         with db() as c:
