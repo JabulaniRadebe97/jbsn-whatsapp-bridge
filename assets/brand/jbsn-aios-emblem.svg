@@ -1,1 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc"><title id="title">JBSN AI OS emblem concept</title><desc id="desc">A cyan technical globe with an orange-gold core on a deep ink background.</desc><rect width="256" height="256" rx="54" fill="#070a0f"/><circle cx="128" cy="128" r="91" fill="none" stroke="#00bfff" stroke-width="5"/><ellipse cx="128" cy="128" rx="40" ry="91" fill="none" stroke="#00bfff" stroke-width="3"/><path d="M37 128h182M50 84h156M50 172h156" fill="none" stroke="#00bfff" stroke-width="3" opacity=".85"/><path d="M128 25v37M128 194v37M25 128h37M194 128h37" stroke="#ff9f1c" stroke-width="5" stroke-linecap="round"/><circle cx="128" cy="128" r="14" fill="#ff9f1c"/><circle cx="128" cy="128" r="6" fill="#f5f7fa"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+<title id="title">JBSN AI OS emblem</title><desc id="desc">A technical sibling mark using the JBSN World meridian monogram with a precise blue system node.</desc>
+<rect x="3" y="3" width="122" height="122" rx="29" fill="#070A0F"/>
+<path d="M88.5 24.3A47.5 47.5 0 1 0 102 77.5" fill="none" stroke="#D4AF37" stroke-width="3.3" stroke-linecap="round"/>
+<path d="M42 39h38v30c0 14.1-8.2 22.2-21.2 22.2-10.2 0-17.4-5.2-20.1-14" fill="none" stroke="#F5F7FA" stroke-width="7.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M80 53h11M80 62h15" fill="none" stroke="#168CFF" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="95" cy="62" r="3" fill="#168CFF"/>
+<circle cx="89" cy="24.5" r="3.6" fill="#D4AF37"/>
+<circle cx="39" cy="77.5" r="2.8" fill="#D4AF37"/>
+</svg>
