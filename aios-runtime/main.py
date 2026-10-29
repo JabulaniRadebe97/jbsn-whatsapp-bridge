@@ -362,7 +362,7 @@ def normalize_lead_payload(payload, partial=False):
         text_value = str(value).strip()
         if len(text_value) > LEAD_FIELD_LIMITS[key]:
             raise ValueError(f"{key} exceeds {LEAD_FIELD_LIMITS[key]} characters")
-        if key == "email" and text_value and not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", text_value):
+        if key == "email" and text_value and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text_value):
             raise ValueError("email must be a valid email address")
         cleaned[key] = text_value
     return cleaned
