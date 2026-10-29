@@ -47,5 +47,29 @@ class PlanContractTests(unittest.TestCase):
                 runtime.configured_lease_seconds(value)
 
 
+    def test_crm_lead_payload_validates_required_business_name(self):
+        self.assertEqual(runtime.normalize_lead_payload({"business_name": "Example Ltd"})["business_name"], "Example Ltd")
+        with self.assertRaisesRegex(ValueError, "business_name is required"):
+            runtime.normalize_lead_payload({"contact_name": "Alex"})
+
+    def test_crm_lead_payload_rejects_invalid_status_and_contact_basis(self):
+        with self.assertRaisesRegex(ValueError, "invalid lead status"):
+            runtime.normalize_lead_payload({"business_name": "Example", "status": "send_now"})
+        with self.assertRaisesRegex(ValueError, "invalid contact_basis"):
+            runtime.normalize_lead_payload({"business_name": "Example", "contact_basis": "unverified_consent"})
+
+    def test_crm_lead_payload_validates_email_and_limits(self):
+        with self.assertRaisesRegex(ValueError, "valid email"):
+            runtime.normalize_lead_payload({"business_name": "Example", "email": "not-an-email"})
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            runtime.normalize_lead_payload({"business_name": "x" * 181})
+
+    def test_crm_lead_partial_update_requires_allowed_fields(self):
+        self.assertEqual(runtime.normalize_lead_payload({"status": "callback"}, partial=True), {"status": "callback"})
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            runtime.normalize_lead_payload({}, partial=True)
+        with self.assertRaisesRegex(ValueError, "unsupported lead field"):
+            runtime.normalize_lead_payload({"payment_confirmed": True}, partial=True)
+
 if __name__ == "__main__":
     unittest.main()
