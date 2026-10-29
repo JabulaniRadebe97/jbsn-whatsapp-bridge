@@ -69,6 +69,14 @@ Cyan is the AI OS interface accent; orange-gold is reserved for parent-brand sig
 5. Provide light and dark variants for production use; ensure small-size legibility and a monochrome fallback.
 6. The supplied “JBSN World.png” ecosystem board is the design authority. SVG concepts and CSS marks must never replace the exact master logo artwork when that artwork can be used.
 
+## Working JBSN World vector identity — v1
+
+The founder requested a professional JBSN World logo and a consistent application across the World website, founder HQ, and JBSN AI OS. The previously referenced founder-supplied ecosystem board remains unavailable; this original vector direction is therefore a proposed working identity pending founder review, not a claim that the missing master was recovered or that a trademark is registered.
+
+The mark uses an open meridian circle around a J monogram, with a restrained metallic-gold point. JBSN World uses near-black, gold, and white; JBSN AI OS carries the same geometry with electric blue as its product signal. JBSN Creative retains its separate purple/magenta identity.
+
+Source assets are in assets/brand/: jbsn-world-symbol.svg, light/dark JBSN World lockups, the favicon, jbsn-aios-emblem.svg, and the AIOS product lockup. The AIOS dashboard uses the inline product emblem so it remains available under the current runtime's content policy.
+
 ## Interface design rules
 
 - Dark executive surfaces, subtle borders, restrained depth and generous spacing.
